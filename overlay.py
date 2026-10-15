@@ -154,7 +154,7 @@ class TargetManager:
                 return True
         return False
 
-# Accurate reachability and DNS checks
+# DNS resolution check
 def check_dns(host):
     t0 = time.time()
     try:
@@ -163,18 +163,29 @@ def check_dns(host):
     except Exception as e:
         return {"status": "error", "time": round((time.time() - t0) * 1000), "error": str(e)}
 
+# Silent, zero-glitch Ping check (guaranteed no console creation or GPU DWM flicker)
 def ping_host(host, timeout_ms=1000):
     t0 = time.time()
     try:
         if IS_WINDOWS:
             cmd = ['ping', '-n', '1', '-w', str(timeout_ms), host]
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+            creationflags = subprocess.CREATE_NO_WINDOW
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                startupinfo=startupinfo,
+                creationflags=creationflags
+            )
         else:
             cmd = ['ping', '-c', '1', '-W', '1', host]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=1.5)
 
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=1.5)
         out = res.stdout
-
-        # Extract millisecond timing from output
         m = re.search(r'time[=<](\d+)ms', out, re.IGNORECASE)
         if m:
             return {"status": "ok", "latency": int(m.group(1))}
@@ -200,27 +211,10 @@ def check_tcp(host, port, timeout_sec=1.5):
         s.close()
         return {"status": "error", "time": round((time.time() - t0) * 1000)}
 
-def check_http_fast(url, timeout_sec=2.0):
-    t0 = time.time()
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
-    }
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            dur = round((time.time() - t0) * 1000)
-            return {"status": "ok", "time": dur, "code": resp.status}
-    except urllib.error.HTTPError as e:
-        dur = round((time.time() - t0) * 1000)
-        return {"status": "ok" if e.code < 500 else "error", "time": dur, "code": e.code}
-    except Exception:
-        return {"status": "timeout", "time": round(timeout_sec * 1000)}
-
 def probe_target(target):
-    t_type = target.get("type", "web")
     host = target["host"]
 
-    # 1. DNS Resolution check (for domains)
+    # 1. DNS Resolution check
     dns_info = None
     if not re.match(r'^\d+\.\d+\.\d+\.\d+$', host):
         dns_res = check_dns(host)
@@ -229,9 +223,8 @@ def probe_target(target):
         else:
             return {"status": "error", "latency": dns_res["time"], "detail": "DNS Failed"}
 
-    # 2. Ping Reachability (most accurate real-time metric)
+    # 2. Ping Reachability
     ping_res = ping_host(host)
-
     if ping_res["status"] == "ok":
         lat = ping_res["latency"]
         status = "slow" if lat > 180 else "ok"
@@ -240,8 +233,8 @@ def probe_target(target):
             detail_parts.append(dns_info)
         return {"status": status, "latency": lat, "detail": " | ".join(detail_parts)}
 
-    # Fallback to TCP if ping is filtered by firewall
-    port = target.get("port", 443 if t_type in ("web", "api") else 53)
+    # Fallback to TCP if ping is filtered
+    port = target.get("port", 443 if target.get("type") in ("web", "api") else 53)
     tcp_res = check_tcp(host, port)
     if tcp_res["status"] == "ok":
         lat = tcp_res["time"]
@@ -278,7 +271,7 @@ class DesktopOverlayApp:
         # Polling thread
         self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
         self.poll_thread.start()
-        log("NetPulse UI initialized with smart multi-probe engine")
+        log("NetPulse UI initialized with zero-flicker background engine")
 
     def setup_ui(self):
         # Header toolbar
@@ -463,11 +456,12 @@ class DesktopOverlayApp:
                 if not self.running:
                     break
                 results[t["id"]] = probe_target(t)
+                time.sleep(0.1)  # Smooth spacing between probes
 
             if self.running:
                 self.root.after(0, lambda r=results: self.update_probe_ui(r))
 
-            time.sleep(3.0)
+            time.sleep(4.0)
 
     def update_probe_ui(self, results):
         has_error = False
