@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 NetPulse Desktop System Overlay
-A real-time, always-on-top, 3-tier network stability overlay HUD written in pure Python (Tkinter).
-Guaranteed persistent desktop presence - never hides behind Firefox or full-screen apps.
+A frameless, draggable, always-on-top HUD overlay with a 1-click minimize/collapse button.
 """
 
 import os
@@ -64,50 +63,50 @@ DEFAULT_TARGETS = [
     {
         "id": "lan",
         "name": "Router (LAN)",
-        "desc": "Local Wi-Fi / Router Link",
+        "short": "LAN",
         "host": GATEWAY_IP,
         "type": "dns_ip",
-        "tier": "Tier 1: LAN",
+        "tier": "tier1",
         "deletable": False
     },
     {
         "id": "cf_dns",
         "name": "Cloudflare DNS",
-        "desc": "Primary Name Resolution",
+        "short": "DNS",
         "host": "1.1.1.1",
         "port": 53,
         "type": "dns_ip",
-        "tier": "Tier 2: DNS",
+        "tier": "tier2",
         "deletable": False
     },
     {
         "id": "google_dns",
         "name": "Google DNS",
-        "desc": "Backup Name Resolution",
+        "short": "Google",
         "host": "8.8.8.8",
         "port": 53,
         "type": "dns_ip",
-        "tier": "Tier 2: DNS",
+        "tier": "tier2",
         "deletable": False
     },
     {
         "id": "ddg",
         "name": "DuckDuckGo",
-        "desc": "Search Engine Endpoint",
+        "short": "DDG",
         "host": "duckduckgo.com",
         "url": "https://duckduckgo.com",
         "type": "web",
-        "tier": "Tier 3: Web",
+        "tier": "tier3",
         "deletable": False
     },
     {
         "id": "github",
         "name": "GitHub (Baseline)",
-        "desc": "Global Internet Reachability",
+        "short": "Web",
         "host": "github.com",
         "url": "https://github.com",
         "type": "web",
-        "tier": "Tier 3: Web",
+        "tier": "tier3",
         "deletable": False
     }
 ]
@@ -171,13 +170,14 @@ class TargetManager:
             elif target_type in ("web", "api"):
                 target_url = f"https://{clean_host}"
 
+            short = name.strip()[:6] or clean_host[:6]
             new_target = {
                 "id": tid,
                 "name": name.strip() or clean_host,
-                "desc": "Custom Target",
+                "short": short,
                 "host": clean_host,
                 "type": target_type,
-                "tier": "Tier 3: Web",
+                "tier": "tier3",
                 "deletable": True
             }
             if target_url:
@@ -198,7 +198,7 @@ class TargetManager:
                 return True
         return False
 
-# Networking checks
+# Network checks
 def check_dns(host):
     t0 = time.time()
     try:
@@ -285,72 +285,184 @@ def probe_target(target):
     return {"status": "timeout", "latency": None, "detail": "Timeout"}
 
 
-class NetPulseOverlayApp:
+class DesktopOverlayHUD:
     def __init__(self, root):
         self.root = root
         self.target_mgr = TargetManager(CONFIG_FILE)
         self.running = True
+        self.is_minimized = False
         self.target_widgets = {}
+        self.pill_widgets = {}
 
-        # Guaranteed-visible Windows Top-Level Window
-        self.root.title("NetPulse Overlay - 24/7 Monitor")
-        self.root.attributes("-topmost", True)      # Floats on top of Firefox and games
-        self.root.configure(bg=COLOR_BG)
+        # Window settings: True frameless floating overlay
+        self.root.title("NetPulse Overlay")
+        self.root.overrideredirect(True)          # Frameless HUD
+        self.root.attributes("-topmost", True)      # Always on top
+        try:
+            self.root.attributes("-alpha", 0.94)    # Sleek dark glass
+        except Exception:
+            pass
+        self.root.configure(bg=COLOR_BORDER)
 
-        # Compact, sleek HUD window geometry (width 360, height 260)
-        self.root.geometry("360x260+100+100")
-        self.root.minsize(320, 220)
+        # Default size and position
+        self.full_width = 320
+        self.mini_width = 460
+        self.mini_height = 34
+
+        # Position at (150, 150) for immediate visibility
+        self.root.geometry(f"{self.full_width}x240+150+150")
+
+        # Dragging variables
+        self.drag_x = 0
+        self.drag_y = 0
 
         self.setup_ui()
 
-        # Bring forward & register in taskbar
+        # Lift & maintain topmost
         self.root.update_idletasks()
         self.root.lift()
-        self.root.focus_force()
 
         # Polling thread
         self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
         self.poll_thread.start()
-        log("NetPulse persistent top-level HUD initialized")
+        log("NetPulse Desktop HUD initialized with minimize control")
 
     def setup_ui(self):
-        # Header Toolbar
-        self.header = tk.Frame(self.root, bg=COLOR_HEADER, height=34)
+        # Outer container with border
+        self.container = tk.Frame(self.root, bg=COLOR_BG, bd=0)
+        self.container.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        # Header Bar (Draggable)
+        self.header = tk.Frame(self.container, bg=COLOR_HEADER, height=32)
         self.header.pack(fill=tk.X, side=tk.TOP)
         self.header.pack_propagate(False)
 
-        # Pulse circle
-        self.pulse_canvas = tk.Canvas(self.header, width=12, height=12, bg=COLOR_HEADER, highlightthickness=0)
-        self.pulse_circle = self.pulse_canvas.create_oval(1, 1, 11, 11, fill=COLOR_GREEN, outline="")
-        self.pulse_canvas.pack(side=tk.LEFT, padx=(10, 6))
+        self.header.bind("<Button-1>", self.on_drag_start)
+        self.header.bind("<B1-Motion>", self.on_drag_motion)
 
-        # Title
+        # Status pulse dot
+        self.pulse_canvas = tk.Canvas(self.header, width=12, height=12, bg=COLOR_HEADER, highlightthickness=0)
+        self.pulse_circle = self.pulse_canvas.create_oval(2, 2, 10, 10, fill=COLOR_GREEN, outline="")
+        self.pulse_canvas.pack(side=tk.LEFT, padx=(8, 4))
+        self.pulse_canvas.bind("<Button-1>", self.on_drag_start)
+        self.pulse_canvas.bind("<B1-Motion>", self.on_drag_motion)
+
+        # Title / Mini Ticker area
         self.title_lbl = tk.Label(
-            self.header, text="NetPulse 3-Tier Monitor", bg=COLOR_HEADER, fg=COLOR_TEXT,
+            self.header, text="NetPulse Overlay", bg=COLOR_HEADER, fg=COLOR_TEXT,
             font=("Segoe UI", 9, "bold")
         )
         self.title_lbl.pack(side=tk.LEFT)
+        self.title_lbl.bind("<Button-1>", self.on_drag_start)
+        self.title_lbl.bind("<B1-Motion>", self.on_drag_motion)
 
-        # Action Buttons
-        self.btn_add = tk.Button(
-            self.header, text="+ Add", bg=COLOR_ACCENT, fg="white",
-            font=("Segoe UI", 8, "bold"), bd=0, padx=8, pady=2, cursor="hand2",
-            command=self.open_add_dialog
+        # Compact Ticker items (visible only when minimized)
+        self.mini_ticker_frame = tk.Frame(self.header, bg=COLOR_HEADER)
+        self.mini_ticker_frame.bind("<Button-1>", self.on_drag_start)
+        self.mini_ticker_frame.bind("<B1-Motion>", self.on_drag_motion)
+
+        # Window Controls: Close (✕), Minimize (─), Add (+)
+        self.btn_close = tk.Label(
+            self.header, text="✕", bg=COLOR_HEADER, fg=COLOR_MUTED,
+            font=("Segoe UI", 9), cursor="hand2", width=3
         )
-        self.btn_add.pack(side=tk.RIGHT, padx=6)
+        self.btn_close.pack(side=tk.RIGHT, padx=(0, 4))
+        self.btn_close.bind("<Button-1>", lambda e: self.close_app())
+        self.btn_close.bind("<Enter>", lambda e: self.btn_close.config(fg=COLOR_RED))
+        self.btn_close.bind("<Leave>", lambda e: self.btn_close.config(fg=COLOR_MUTED))
 
-        # Container for target cards
-        self.content_frame = tk.Frame(self.root, bg=COLOR_BG)
+        # Minimize / Collapse Button
+        self.btn_minimize = tk.Label(
+            self.header, text="─", bg=COLOR_HEADER, fg=COLOR_MUTED,
+            font=("Segoe UI", 10, "bold"), cursor="hand2", width=3
+        )
+        self.btn_minimize.pack(side=tk.RIGHT, padx=2)
+        self.btn_minimize.bind("<Button-1>", lambda e: self.toggle_minimize())
+        self.btn_minimize.bind("<Enter>", lambda e: self.btn_minimize.config(fg=COLOR_TEXT))
+        self.btn_minimize.bind("<Leave>", lambda e: self.btn_minimize.config(fg=COLOR_MUTED))
+
+        # Add target button (+)
+        self.btn_add = tk.Label(
+            self.header, text="+", bg=COLOR_HEADER, fg=COLOR_MUTED,
+            font=("Segoe UI", 11, "bold"), cursor="hand2", width=3
+        )
+        self.btn_add.pack(side=tk.RIGHT, padx=2)
+        self.btn_add.bind("<Button-1>", lambda e: self.open_add_dialog())
+        self.btn_add.bind("<Enter>", lambda e: self.btn_add.config(fg=COLOR_ACCENT))
+        self.btn_add.bind("<Leave>", lambda e: self.btn_add.config(fg=COLOR_MUTED))
+
+        # Content frame for full view cards
+        self.content_frame = tk.Frame(self.container, bg=COLOR_BG)
         self.content_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
-        # Bottom status bar
-        self.status_bar = tk.Label(
-            self.root, text=f"Gateway: {GATEWAY_IP} | Always-on-top | 24/7 Live",
-            bg=COLOR_HEADER, fg=COLOR_MUTED, font=("Segoe UI", 7), anchor="w", padx=10, pady=3
-        )
-        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
-
         self.render_target_list()
+        self.setup_mini_ticker()
+
+    def on_drag_start(self, event):
+        self.drag_x = event.x_root - self.root.winfo_x()
+        self.drag_y = event.y_root - self.root.winfo_y()
+
+    def on_drag_motion(self, event):
+        x = event.x_root - self.drag_x
+        y = event.y_root - self.drag_y
+        self.root.geometry(f"+{x}+{y}")
+
+    def toggle_minimize(self):
+        self.is_minimized = not self.is_minimized
+        if self.is_minimized:
+            # Collapse to minimal floating ticker pill
+            self.btn_minimize.config(text="□")
+            self.title_lbl.pack_forget()
+            self.content_frame.pack_forget()
+            self.mini_ticker_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 8))
+            self.root.geometry(f"{self.mini_width}x{self.mini_height}")
+        else:
+            # Expand to full cards view
+            self.btn_minimize.config(text="─")
+            self.mini_ticker_frame.pack_forget()
+            self.title_lbl.pack(side=tk.LEFT)
+            self.content_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+            self.update_full_height()
+
+        self.root.lift()
+
+    def update_full_height(self):
+        targets = self.target_mgr.get_targets()
+        calc_h = 36 + (len(targets) * 38) + 12
+        self.root.geometry(f"{self.full_width}x{calc_h}")
+
+    def setup_mini_ticker(self):
+        for w in self.mini_ticker_frame.winfo_children():
+            w.destroy()
+        self.pill_widgets.clear()
+
+        targets = self.target_mgr.get_targets()
+        for idx, t in enumerate(targets):
+            tid = t["id"]
+            box = tk.Frame(self.mini_ticker_frame, bg=COLOR_HEADER)
+            box.pack(side=tk.LEFT, padx=3)
+            box.bind("<Button-1>", self.on_drag_start)
+            box.bind("<B1-Motion>", self.on_drag_motion)
+
+            c = tk.Canvas(box, width=7, height=7, bg=COLOR_HEADER, highlightthickness=0)
+            dot = c.create_oval(1, 1, 6, 6, fill=COLOR_MUTED, outline="")
+            c.pack(side=tk.LEFT, padx=(0, 2))
+            c.bind("<Button-1>", self.on_drag_start)
+            c.bind("<B1-Motion>", self.on_drag_motion)
+
+            short = t.get("short", t["name"][:4])
+            lbl = tk.Label(box, text=f"{short}:--", bg=COLOR_HEADER, fg=COLOR_TEXT, font=("Segoe UI", 7))
+            lbl.pack(side=tk.LEFT)
+            lbl.bind("<Button-1>", self.on_drag_start)
+            lbl.bind("<B1-Motion>", self.on_drag_motion)
+
+            self.pill_widgets[tid] = {"dot": dot, "canvas": c, "lbl": lbl, "short": short}
+
+            if idx < len(targets) - 1:
+                sep = tk.Label(self.mini_ticker_frame, text="|", bg=COLOR_HEADER, fg=COLOR_BORDER, font=("Segoe UI", 7))
+                sep.pack(side=tk.LEFT, padx=1)
+                sep.bind("<Button-1>", self.on_drag_start)
+                sep.bind("<B1-Motion>", self.on_drag_motion)
 
     def render_target_list(self):
         for widget in self.content_frame.winfo_children():
@@ -361,9 +473,9 @@ class NetPulseOverlayApp:
         for t in targets:
             tid = t["id"]
             row = tk.Frame(self.content_frame, bg=COLOR_CARD, bd=1, relief="solid")
-            row.pack(fill=tk.X, pady=2, ipady=2)
+            row.pack(fill=tk.X, pady=2, ipady=3)
 
-            # Left status dot
+            # Left dot
             canvas = tk.Canvas(row, width=10, height=10, bg=COLOR_CARD, highlightthickness=0)
             dot = canvas.create_oval(1, 1, 9, 9, fill=COLOR_MUTED, outline="")
             canvas.pack(side=tk.LEFT, padx=(8, 6))
@@ -375,7 +487,7 @@ class NetPulseOverlayApp:
             tier_tag = ""
             if tid == "lan":
                 tier_tag = "[LAN] "
-            elif t.get("tier") == "Tier 2: DNS":
+            elif t.get("tier") == "tier2":
                 tier_tag = "[DNS] "
 
             name_lbl = tk.Label(
@@ -418,26 +530,26 @@ class NetPulseOverlayApp:
                 "row": row
             }
 
-        # Dynamic window height adjustment
-        calc_height = 34 + (len(targets) * 38) + 24
-        self.root.geometry(f"{self.root.winfo_width()}x{calc_height}")
+        if not self.is_minimized:
+            self.update_full_height()
 
     def delete_target(self, tid):
         if messagebox.askyesno("NetPulse", "Remove target from monitor?"):
             self.target_mgr.delete_target(tid)
             self.render_target_list()
+            self.setup_mini_ticker()
 
     def open_add_dialog(self):
         dialog = tk.Toplevel(self.root)
-        dialog.title("Add Monitoring Target")
+        dialog.title("Add Target")
         dialog.attributes("-topmost", True)
         dialog.configure(bg=COLOR_BG)
-        dialog.geometry("280x210+150+150")
+        dialog.geometry("280x210+200+200")
         dialog.resizable(False, False)
 
         tk.Label(dialog, text="Add Target", bg=COLOR_BG, fg=COLOR_TEXT, font=("Segoe UI", 9, "bold")).pack(pady=(10, 4))
 
-        tk.Label(dialog, text="Display Name:", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14)
+        tk.Label(dialog, text="Name:", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14)
         entry_name = tk.Entry(dialog, bg=COLOR_CARD, fg=COLOR_TEXT, insertbackground="white", bd=1)
         entry_name.pack(fill=tk.X, padx=14, pady=(1, 4))
 
@@ -458,6 +570,7 @@ class NetPulseOverlayApp:
             self.target_mgr.add_target(name, host, target_type=type_var.get())
             dialog.destroy()
             self.render_target_list()
+            self.setup_mini_ticker()
 
         btn_box = tk.Frame(dialog, bg=COLOR_BG)
         btn_box.pack(fill=tk.X, padx=14)
@@ -484,10 +597,6 @@ class NetPulseOverlayApp:
         has_slow = False
 
         for tid, res in results.items():
-            if tid not in self.target_widgets:
-                continue
-
-            widgets = self.target_widgets[tid]
             status = res["status"]
             lat = res["latency"]
 
@@ -507,9 +616,18 @@ class NetPulseOverlayApp:
                 text = "ERROR"
                 has_error = True
 
-            widgets["canvas"].itemconfig(widgets["dot"], fill=color)
-            widgets["lat_lbl"].config(text=text, fg=color)
-            widgets["detail_lbl"].config(text=res.get("detail", ""))
+            # Full view update
+            if tid in self.target_widgets:
+                w = self.target_widgets[tid]
+                w["canvas"].itemconfig(w["dot"], fill=color)
+                w["lat_lbl"].config(text=text, fg=color)
+                w["detail_lbl"].config(text=res.get("detail", ""))
+
+            # Minimized view update
+            if tid in self.pill_widgets:
+                pw = self.pill_widgets[tid]
+                pw["canvas"].itemconfig(pw["dot"], fill=color)
+                pw["lbl"].config(text=f"{pw['short']}:{text}", fg=color if status != 'ok' else COLOR_TEXT)
 
         if has_error:
             self.pulse_canvas.itemconfig(self.pulse_circle, fill=COLOR_RED)
@@ -518,12 +636,16 @@ class NetPulseOverlayApp:
         else:
             self.pulse_canvas.itemconfig(self.pulse_circle, fill=COLOR_GREEN)
 
+    def close_app(self):
+        self.running = False
+        self.root.destroy()
+
 
 def main():
-    log("Starting NetPulse Overlay main()")
+    log("Starting NetPulse Desktop HUD main()")
     try:
         root = tk.Tk()
-        app = NetPulseOverlayApp(root)
+        app = DesktopOverlayHUD(root)
         root.mainloop()
         log("NetPulse closed normally")
     except Exception as e:
