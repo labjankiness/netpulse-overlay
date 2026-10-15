@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 NetPulse Desktop System Overlay
-An ultra-minimalist, 3-tier, 24/7 network stability overlay HUD written in pure Python (Tkinter).
-Runs natively on Windows desktop without needing a browser.
+A real-time, always-on-top, 3-tier network stability overlay HUD written in pure Python (Tkinter).
+Guaranteed persistent desktop presence - never hides behind Firefox or full-screen apps.
 """
 
 import os
@@ -64,59 +64,59 @@ DEFAULT_TARGETS = [
     {
         "id": "lan",
         "name": "Router (LAN)",
-        "short": "LAN",
+        "desc": "Local Wi-Fi / Router Link",
         "host": GATEWAY_IP,
         "type": "dns_ip",
-        "tier": "tier1",
+        "tier": "Tier 1: LAN",
         "deletable": False
     },
     {
         "id": "cf_dns",
         "name": "Cloudflare DNS",
-        "short": "DNS",
+        "desc": "Primary Name Resolution",
         "host": "1.1.1.1",
         "port": 53,
         "type": "dns_ip",
-        "tier": "tier2",
+        "tier": "Tier 2: DNS",
         "deletable": False
     },
     {
         "id": "google_dns",
         "name": "Google DNS",
-        "short": "Google",
+        "desc": "Backup Name Resolution",
         "host": "8.8.8.8",
         "port": 53,
         "type": "dns_ip",
-        "tier": "tier2",
+        "tier": "Tier 2: DNS",
         "deletable": False
     },
     {
         "id": "ddg",
         "name": "DuckDuckGo",
-        "short": "DDG",
+        "desc": "Search Engine Endpoint",
         "host": "duckduckgo.com",
         "url": "https://duckduckgo.com",
         "type": "web",
-        "tier": "tier3",
+        "tier": "Tier 3: Web",
         "deletable": False
     },
     {
         "id": "github",
-        "name": "GitHub (Web)",
-        "short": "Web",
+        "name": "GitHub (Baseline)",
+        "desc": "Global Internet Reachability",
         "host": "github.com",
         "url": "https://github.com",
         "type": "web",
-        "tier": "tier3",
+        "tier": "Tier 3: Web",
         "deletable": False
     }
 ]
 
-# Palette
-COLOR_BG = "#090d16"
-COLOR_HEADER = "#131b2e"
-COLOR_CARD = "#111827"
-COLOR_BORDER = "#1f293d"
+# Color Palette
+COLOR_BG = "#0b0f19"
+COLOR_HEADER = "#151e32"
+COLOR_CARD = "#131b2e"
+COLOR_BORDER = "#25334e"
 COLOR_TEXT = "#f8fafc"
 COLOR_MUTED = "#94a3b8"
 COLOR_GREEN = "#10b981"
@@ -137,7 +137,6 @@ class TargetManager:
                 try:
                     with open(self.filepath, 'r', encoding='utf-8') as f:
                         loaded = json.load(f)
-                        # Ensure LAN target exists at start
                         has_lan = any(t.get('id') == 'lan' for t in loaded)
                         if not has_lan:
                             lan_target = dict(DEFAULT_TARGETS[0])
@@ -172,14 +171,13 @@ class TargetManager:
             elif target_type in ("web", "api"):
                 target_url = f"https://{clean_host}"
 
-            short_name = name.strip()[:6] or clean_host[:6]
             new_target = {
                 "id": tid,
                 "name": name.strip() or clean_host,
-                "short": short_name,
+                "desc": "Custom Target",
                 "host": clean_host,
                 "type": target_type,
-                "tier": "tier3",
+                "tier": "Tier 3: Web",
                 "deletable": True
             }
             if target_url:
@@ -260,7 +258,6 @@ def probe_target(target):
     host = target["host"]
     is_ip = bool(re.match(r'^\d+\.\d+\.\d+\.\d+$', host))
 
-    # DNS check for domain targets
     dns_time = None
     if not is_ip:
         dns_res = check_dns(host)
@@ -269,7 +266,6 @@ def probe_target(target):
         else:
             return {"status": "error", "latency": dns_res["time"], "detail": "DNS Fail"}
 
-    # Ping reachability
     ping_res = ping_host(host)
     if ping_res["status"] == "ok":
         lat = ping_res["latency"]
@@ -279,7 +275,6 @@ def probe_target(target):
             detail += f" | DNS {dns_time}ms"
         return {"status": status, "latency": lat, "detail": detail}
 
-    # TCP fallback
     port = target.get("port", 443 if target.get("type") in ("web", "api") else 53)
     tcp_res = check_tcp(host, port)
     if tcp_res["status"] == "ok":
@@ -290,229 +285,124 @@ def probe_target(target):
     return {"status": "timeout", "latency": None, "detail": "Timeout"}
 
 
-class MinimalistOverlayApp:
+class NetPulseOverlayApp:
     def __init__(self, root):
         self.root = root
         self.target_mgr = TargetManager(CONFIG_FILE)
         self.running = True
-        self.is_expanded = False
-        self.target_pill_widgets = {}  # tid -> dict
-        self.target_card_widgets = {}  # tid -> dict
+        self.target_widgets = {}
 
-        # Overlay window attributes
-        self.root.title("NetPulse Mini HUD")
-        self.root.overrideredirect(True)          # Frameless floating HUD
-        self.root.attributes("-topmost", True)      # Always on top
-        try:
-            self.root.attributes("-alpha", 0.92)    # Clean glass transparency
-        except Exception:
-            pass
-        self.root.configure(bg=COLOR_BORDER)
+        # Guaranteed-visible Windows Top-Level Window
+        self.root.title("NetPulse Overlay - 24/7 Monitor")
+        self.root.attributes("-topmost", True)      # Floats on top of Firefox and games
+        self.root.configure(bg=COLOR_BG)
 
-        # Initial geometry: top-right corner of screen
-        screen_w = self.root.winfo_screenwidth()
-        self.pill_w = 440
-        self.pill_h = 32
-        self.expanded_w = 440
-        self.expanded_h = 280
-
-        init_x = max(20, screen_w - self.pill_w - 30)
-        init_y = 20
-        self.root.geometry(f"{self.pill_w}x{self.pill_h}+{init_x}+{init_y}")
-
-        # Drag tracking
-        self.drag_x = 0
-        self.drag_y = 0
+        # Compact, sleek HUD window geometry (width 360, height 260)
+        self.root.geometry("360x260+100+100")
+        self.root.minsize(320, 220)
 
         self.setup_ui()
 
+        # Bring forward & register in taskbar
         self.root.update_idletasks()
         self.root.lift()
+        self.root.focus_force()
 
         # Polling thread
         self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
         self.poll_thread.start()
-        log("NetPulse Minimalist HUD started")
+        log("NetPulse persistent top-level HUD initialized")
 
     def setup_ui(self):
-        # Outer border container
-        self.container = tk.Frame(self.root, bg=COLOR_BG, bd=0)
-        self.container.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        # Header Toolbar
+        self.header = tk.Frame(self.root, bg=COLOR_HEADER, height=34)
+        self.header.pack(fill=tk.X, side=tk.TOP)
+        self.header.pack_propagate(False)
 
-        # --- Minimalist Pill Bar (Always Visible) ---
-        self.pill_frame = tk.Frame(self.container, bg=COLOR_HEADER, height=30)
-        self.pill_frame.pack(fill=tk.X, side=tk.TOP)
-        self.pill_frame.pack_propagate(False)
+        # Pulse circle
+        self.pulse_canvas = tk.Canvas(self.header, width=12, height=12, bg=COLOR_HEADER, highlightthickness=0)
+        self.pulse_circle = self.pulse_canvas.create_oval(1, 1, 11, 11, fill=COLOR_GREEN, outline="")
+        self.pulse_canvas.pack(side=tk.LEFT, padx=(10, 6))
 
-        # Dragging handlers on pill bar
-        self.pill_frame.bind("<Button-1>", self.on_drag_start)
-        self.pill_frame.bind("<B1-Motion>", self.on_drag_motion)
-
-        # Left Logo Pulse
-        self.pulse_canvas = tk.Canvas(self.pill_frame, width=10, height=10, bg=COLOR_HEADER, highlightthickness=0)
-        self.pulse_circle = self.pulse_canvas.create_oval(1, 1, 9, 9, fill=COLOR_GREEN, outline="")
-        self.pulse_canvas.pack(side=tk.LEFT, padx=(8, 4))
-        self.pulse_canvas.bind("<Button-1>", self.on_drag_start)
-        self.pulse_canvas.bind("<B1-Motion>", self.on_drag_motion)
-
-        # Pill Ticker Items Container
-        self.ticker_box = tk.Frame(self.pill_frame, bg=COLOR_HEADER)
-        self.ticker_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.ticker_box.bind("<Button-1>", self.on_drag_start)
-        self.ticker_box.bind("<B1-Motion>", self.on_drag_motion)
-
-        # Right Controls: Add (+), Expand (▼), Close (✕)
-        self.btn_close = tk.Label(
-            self.pill_frame, text="✕", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 8), cursor="hand2", width=2
+        # Title
+        self.title_lbl = tk.Label(
+            self.header, text="NetPulse 3-Tier Monitor", bg=COLOR_HEADER, fg=COLOR_TEXT,
+            font=("Segoe UI", 9, "bold")
         )
-        self.btn_close.pack(side=tk.RIGHT, padx=(0, 6))
-        self.btn_close.bind("<Button-1>", lambda e: self.close_app())
-        self.btn_close.bind("<Enter>", lambda e: self.btn_close.config(fg=COLOR_RED))
-        self.btn_close.bind("<Leave>", lambda e: self.btn_close.config(fg=COLOR_MUTED))
+        self.title_lbl.pack(side=tk.LEFT)
 
-        self.btn_toggle = tk.Label(
-            self.pill_frame, text="▼", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 7), cursor="hand2", width=2
+        # Action Buttons
+        self.btn_add = tk.Button(
+            self.header, text="+ Add", bg=COLOR_ACCENT, fg="white",
+            font=("Segoe UI", 8, "bold"), bd=0, padx=8, pady=2, cursor="hand2",
+            command=self.open_add_dialog
         )
-        self.btn_toggle.pack(side=tk.RIGHT, padx=2)
-        self.btn_toggle.bind("<Button-1>", lambda e: self.toggle_expand())
-        self.btn_toggle.bind("<Enter>", lambda e: self.btn_toggle.config(fg=COLOR_TEXT))
-        self.btn_toggle.bind("<Leave>", lambda e: self.btn_toggle.config(fg=COLOR_MUTED))
+        self.btn_add.pack(side=tk.RIGHT, padx=6)
 
-        self.btn_add = tk.Label(
-            self.pill_frame, text="+", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 9, "bold"), cursor="hand2", width=2
+        # Container for target cards
+        self.content_frame = tk.Frame(self.root, bg=COLOR_BG)
+        self.content_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        # Bottom status bar
+        self.status_bar = tk.Label(
+            self.root, text=f"Gateway: {GATEWAY_IP} | Always-on-top | 24/7 Live",
+            bg=COLOR_HEADER, fg=COLOR_MUTED, font=("Segoe UI", 7), anchor="w", padx=10, pady=3
         )
-        self.btn_add.pack(side=tk.RIGHT, padx=2)
-        self.btn_add.bind("<Button-1>", lambda e: self.open_add_dialog())
-        self.btn_add.bind("<Enter>", lambda e: self.btn_add.config(fg=COLOR_ACCENT))
-        self.btn_add.bind("<Leave>", lambda e: self.btn_add.config(fg=COLOR_MUTED))
+        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
-        # --- Expanded Details Drawer (Initially Hidden) ---
-        self.drawer_frame = tk.Frame(self.container, bg=COLOR_BG)
-        self.setup_ticker_widgets()
+        self.render_target_list()
 
-    def setup_ticker_widgets(self):
-        # Clear ticker
-        for w in self.ticker_box.winfo_children():
-            w.destroy()
-        self.target_pill_widgets.clear()
-
-        targets = self.target_mgr.get_targets()
-        # Keep prominent items in pill (LAN, DNS, DDG, Web, + custom)
-        for idx, t in enumerate(targets):
-            tid = t["id"]
-            item_box = tk.Frame(self.ticker_box, bg=COLOR_HEADER)
-            item_box.pack(side=tk.LEFT, padx=(4, 6))
-            item_box.bind("<Button-1>", self.on_drag_start)
-            item_box.bind("<B1-Motion>", self.on_drag_motion)
-
-            # Dot
-            c = tk.Canvas(item_box, width=7, height=7, bg=COLOR_HEADER, highlightthickness=0)
-            dot = c.create_oval(1, 1, 6, 6, fill=COLOR_MUTED, outline="")
-            c.pack(side=tk.LEFT, padx=(0, 3))
-            c.bind("<Button-1>", self.on_drag_start)
-            c.bind("<B1-Motion>", self.on_drag_motion)
-
-            # Short Label + ms
-            short_title = t.get("short", t["name"][:5])
-            lbl = tk.Label(
-                item_box, text=f"{short_title}: --", bg=COLOR_HEADER, fg=COLOR_TEXT,
-                font=("Segoe UI", 8)
-            )
-            lbl.pack(side=tk.LEFT)
-            lbl.bind("<Button-1>", self.on_drag_start)
-            lbl.bind("<B1-Motion>", self.on_drag_motion)
-
-            self.target_pill_widgets[tid] = {
-                "canvas": c,
-                "dot": dot,
-                "lbl": lbl,
-                "short": short_title
-            }
-
-            # Separator bar between tiers
-            if idx < len(targets) - 1:
-                sep = tk.Label(self.ticker_box, text="|", bg=COLOR_HEADER, fg=COLOR_BORDER, font=("Segoe UI", 8))
-                sep.pack(side=tk.LEFT, padx=2)
-                sep.bind("<Button-1>", self.on_drag_start)
-                sep.bind("<B1-Motion>", self.on_drag_motion)
-
-    def on_drag_start(self, event):
-        self.drag_x = event.x_root - self.root.winfo_x()
-        self.drag_y = event.y_root - self.root.winfo_y()
-
-    def on_drag_motion(self, event):
-        x = event.x_root - self.drag_x
-        y = event.y_root - self.drag_y
-        self.root.geometry(f"+{x}+{y}")
-
-    def toggle_expand(self):
-        self.is_expanded = not self.is_expanded
-        if self.is_expanded:
-            self.btn_toggle.config(text="▲")
-            self.drawer_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-            self.render_drawer_cards()
-            targets_count = len(self.target_mgr.get_targets())
-            calc_h = 36 + (targets_count * 40) + 20
-            self.root.geometry(f"{self.expanded_w}x{calc_h}")
-        else:
-            self.btn_toggle.config(text="▼")
-            self.drawer_frame.pack_forget()
-            self.root.geometry(f"{self.pill_w}x{self.pill_h}")
-
-    def render_drawer_cards(self):
-        for w in self.drawer_frame.winfo_children():
-            w.destroy()
-        self.target_card_widgets.clear()
+    def render_target_list(self):
+        for widget in self.content_frame.winfo_children():
+            widget.destroy()
+        self.target_widgets.clear()
 
         targets = self.target_mgr.get_targets()
         for t in targets:
             tid = t["id"]
-            row = tk.Frame(self.drawer_frame, bg=COLOR_CARD, bd=1, relief="solid")
-            row.pack(fill=tk.X, pady=2, ipady=3)
+            row = tk.Frame(self.content_frame, bg=COLOR_CARD, bd=1, relief="solid")
+            row.pack(fill=tk.X, pady=2, ipady=2)
 
             # Left status dot
-            c = tk.Canvas(row, width=10, height=10, bg=COLOR_CARD, highlightthickness=0)
-            dot = c.create_oval(1, 1, 9, 9, fill=COLOR_MUTED, outline="")
-            c.pack(side=tk.LEFT, padx=(8, 6))
+            canvas = tk.Canvas(row, width=10, height=10, bg=COLOR_CARD, highlightthickness=0)
+            dot = canvas.create_oval(1, 1, 9, 9, fill=COLOR_MUTED, outline="")
+            canvas.pack(side=tk.LEFT, padx=(8, 6))
 
             # Info block
-            info = tk.Frame(row, bg=COLOR_CARD)
-            info.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            info_frame = tk.Frame(row, bg=COLOR_CARD)
+            info_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
             tier_tag = ""
-            if t.get("id") == "lan":
-                tier_tag = "[Router / LAN] "
-            elif t.get("tier") == "tier2":
+            if tid == "lan":
+                tier_tag = "[LAN] "
+            elif t.get("tier") == "Tier 2: DNS":
                 tier_tag = "[DNS] "
 
             name_lbl = tk.Label(
-                info, text=f"{tier_tag}{t['name']}", bg=COLOR_CARD, fg=COLOR_TEXT,
+                info_frame, text=f"{tier_tag}{t['name']}", bg=COLOR_CARD, fg=COLOR_TEXT,
                 font=("Segoe UI", 8, "bold"), anchor="w"
             )
             name_lbl.pack(anchor="w")
 
             detail_lbl = tk.Label(
-                info, text=t["host"], bg=COLOR_CARD, fg=COLOR_MUTED,
+                info_frame, text=t["host"], bg=COLOR_CARD, fg=COLOR_MUTED,
                 font=("Segoe UI", 7), anchor="w"
             )
             detail_lbl.pack(anchor="w")
 
             # Right metrics
-            right = tk.Frame(row, bg=COLOR_CARD)
-            right.pack(side=tk.RIGHT, padx=(4, 8))
+            right_frame = tk.Frame(row, bg=COLOR_CARD)
+            right_frame.pack(side=tk.RIGHT, padx=(4, 8))
 
             lat_lbl = tk.Label(
-                right, text="--ms", bg=COLOR_CARD, fg=COLOR_MUTED,
+                right_frame, text="--ms", bg=COLOR_CARD, fg=COLOR_MUTED,
                 font=("Segoe UI", 8, "bold")
             )
             lat_lbl.pack(side=tk.RIGHT)
 
             if t.get("deletable", False):
                 del_btn = tk.Label(
-                    right, text="✕", bg=COLOR_CARD, fg=COLOR_MUTED,
+                    right_frame, text="✕", bg=COLOR_CARD, fg=COLOR_MUTED,
                     font=("Segoe UI", 8), cursor="hand2"
                 )
                 del_btn.pack(side=tk.RIGHT, padx=(0, 6))
@@ -520,31 +410,34 @@ class MinimalistOverlayApp:
                 del_btn.bind("<Enter>", lambda e, b=del_btn: b.config(fg=COLOR_RED))
                 del_btn.bind("<Leave>", lambda e, b=del_btn: b.config(fg=COLOR_MUTED))
 
-            self.target_card_widgets[tid] = {
-                "canvas": c,
+            self.target_widgets[tid] = {
+                "canvas": canvas,
                 "dot": dot,
                 "lat_lbl": lat_lbl,
-                "detail_lbl": detail_lbl
+                "detail_lbl": detail_lbl,
+                "row": row
             }
+
+        # Dynamic window height adjustment
+        calc_height = 34 + (len(targets) * 38) + 24
+        self.root.geometry(f"{self.root.winfo_width()}x{calc_height}")
 
     def delete_target(self, tid):
         if messagebox.askyesno("NetPulse", "Remove target from monitor?"):
             self.target_mgr.delete_target(tid)
-            self.setup_ticker_widgets()
-            if self.is_expanded:
-                self.render_drawer_cards()
+            self.render_target_list()
 
     def open_add_dialog(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Add Monitoring Target")
         dialog.attributes("-topmost", True)
         dialog.configure(bg=COLOR_BG)
-        dialog.geometry("280x210")
+        dialog.geometry("280x210+150+150")
         dialog.resizable(False, False)
 
         tk.Label(dialog, text="Add Target", bg=COLOR_BG, fg=COLOR_TEXT, font=("Segoe UI", 9, "bold")).pack(pady=(10, 4))
 
-        tk.Label(dialog, text="Name:", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14)
+        tk.Label(dialog, text="Display Name:", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14)
         entry_name = tk.Entry(dialog, bg=COLOR_CARD, fg=COLOR_TEXT, insertbackground="white", bd=1)
         entry_name.pack(fill=tk.X, padx=14, pady=(1, 4))
 
@@ -564,9 +457,7 @@ class MinimalistOverlayApp:
                 return
             self.target_mgr.add_target(name, host, target_type=type_var.get())
             dialog.destroy()
-            self.setup_ticker_widgets()
-            if self.is_expanded:
-                self.render_drawer_cards()
+            self.render_target_list()
 
         btn_box = tk.Frame(dialog, bg=COLOR_BG)
         btn_box.pack(fill=tk.X, padx=14)
@@ -593,39 +484,33 @@ class MinimalistOverlayApp:
         has_slow = False
 
         for tid, res in results.items():
+            if tid not in self.target_widgets:
+                continue
+
+            widgets = self.target_widgets[tid]
             status = res["status"]
             lat = res["latency"]
 
             if status == "ok":
                 color = COLOR_GREEN
-                lat_str = f"{lat}ms" if lat is not None else "OK"
+                text = f"{lat}ms" if lat is not None else "OK"
             elif status == "slow":
                 color = COLOR_YELLOW
-                lat_str = f"{lat}ms" if lat is not None else "SLOW"
+                text = f"{lat}ms" if lat is not None else "SLOW"
                 has_slow = True
             elif status == "timeout":
                 color = COLOR_RED
-                lat_str = "TIMEOUT"
+                text = "TIMEOUT"
                 has_error = True
             else:
                 color = COLOR_RED
-                lat_str = "ERR"
+                text = "ERROR"
                 has_error = True
 
-            # Update Pill item
-            if tid in self.target_pill_widgets:
-                pw = self.target_pill_widgets[tid]
-                pw["canvas"].itemconfig(pw["dot"], fill=color)
-                pw["lbl"].config(text=f"{pw['short']}: {lat_str}", fg=color if status != 'ok' else COLOR_TEXT)
+            widgets["canvas"].itemconfig(widgets["dot"], fill=color)
+            widgets["lat_lbl"].config(text=text, fg=color)
+            widgets["detail_lbl"].config(text=res.get("detail", ""))
 
-            # Update Drawer Card if open
-            if self.is_expanded and tid in self.target_card_widgets:
-                cw = self.target_card_widgets[tid]
-                cw["canvas"].itemconfig(cw["dot"], fill=color)
-                cw["lat_lbl"].config(text=lat_str, fg=color)
-                cw["detail_lbl"].config(text=res.get("detail", ""))
-
-        # Update Master Pulse
         if has_error:
             self.pulse_canvas.itemconfig(self.pulse_circle, fill=COLOR_RED)
         elif has_slow:
@@ -633,16 +518,12 @@ class MinimalistOverlayApp:
         else:
             self.pulse_canvas.itemconfig(self.pulse_circle, fill=COLOR_GREEN)
 
-    def close_app(self):
-        self.running = False
-        self.root.destroy()
-
 
 def main():
-    log("Starting NetPulse Minimalist HUD main()")
+    log("Starting NetPulse Overlay main()")
     try:
         root = tk.Tk()
-        app = MinimalistOverlayApp(root)
+        app = NetPulseOverlayApp(root)
         root.mainloop()
         log("NetPulse closed normally")
     except Exception as e:
