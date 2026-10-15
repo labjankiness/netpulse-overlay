@@ -339,7 +339,7 @@ class DesktopOverlayHUD:
         self.mini_width = 480
         self.mini_height = 34
 
-        self.root.geometry(f"{self.full_width}x320+150+150")
+        self.root.geometry(f"{self.full_width}x320+{self.win_x}+{self.win_y}")
 
         self.drag_x = 0
         self.drag_y = 0
@@ -348,7 +348,11 @@ class DesktopOverlayHUD:
         self.setup_context_menu()
 
         self.root.update_idletasks()
+        self.root.deiconify()
         self.root.lift()
+        self.root.attributes("-topmost", True)
+        if not self.is_pinned:
+            self.root.after(800, lambda: self.root.attributes("-topmost", False))
 
         # Polling thread
         self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
@@ -358,6 +362,8 @@ class DesktopOverlayHUD:
     def load_settings(self):
         self.is_pinned = True
         self.opacity_index = 0
+        self.win_x = 180
+        self.win_y = 120
         if os.path.exists(SETTINGS_FILE):
             try:
                 with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
@@ -366,6 +372,8 @@ class DesktopOverlayHUD:
                     op = data.get("opacity", 0.85)
                     if op in OPACITY_LEVELS:
                         self.opacity_index = OPACITY_LEVELS.index(op)
+                    self.win_x = int(data.get("x", 180))
+                    self.win_y = int(data.get("y", 120))
             except Exception as e:
                 log(f"Settings load error: {e}")
 
@@ -374,7 +382,9 @@ class DesktopOverlayHUD:
             with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
                 json.dump({
                     "pinned": self.is_pinned,
-                    "opacity": OPACITY_LEVELS[self.opacity_index]
+                    "opacity": OPACITY_LEVELS[self.opacity_index],
+                    "x": self.win_x,
+                    "y": self.win_y
                 }, f, indent=2)
         except Exception as e:
             log(f"Settings save error: {e}")
@@ -417,6 +427,7 @@ class DesktopOverlayHUD:
 
         self.header.bind("<Button-1>", self.on_drag_start)
         self.header.bind("<B1-Motion>", self.on_drag_motion)
+        self.header.bind("<ButtonRelease-1>", self.on_drag_end)
         self.header.bind("<Button-3>", self.show_context_menu)
 
         # Pulse indicator
@@ -425,6 +436,7 @@ class DesktopOverlayHUD:
         self.pulse_canvas.pack(side=tk.LEFT, padx=(8, 4))
         self.pulse_canvas.bind("<Button-1>", self.on_drag_start)
         self.pulse_canvas.bind("<B1-Motion>", self.on_drag_motion)
+        self.pulse_canvas.bind("<ButtonRelease-1>", self.on_drag_end)
 
         # Title
         self.title_lbl = tk.Label(
@@ -434,11 +446,13 @@ class DesktopOverlayHUD:
         self.title_lbl.pack(side=tk.LEFT)
         self.title_lbl.bind("<Button-1>", self.on_drag_start)
         self.title_lbl.bind("<B1-Motion>", self.on_drag_motion)
+        self.title_lbl.bind("<ButtonRelease-1>", self.on_drag_end)
 
         # Compact Ticker Area (visible only when minimized)
         self.mini_ticker_frame = tk.Frame(self.header, bg=COLOR_HEADER)
         self.mini_ticker_frame.bind("<Button-1>", self.on_drag_start)
         self.mini_ticker_frame.bind("<B1-Motion>", self.on_drag_motion)
+        self.mini_ticker_frame.bind("<ButtonRelease-1>", self.on_drag_end)
 
         # Controls
         self.btn_close = tk.Label(
@@ -550,16 +564,26 @@ class DesktopOverlayHUD:
     def on_drag_motion(self, event):
         x = event.x_root - self.drag_x
         y = event.y_root - self.drag_y
+        self.win_x = x
+        self.win_y = y
         self.root.geometry(f"+{x}+{y}")
+
+    def on_drag_end(self, event):
+        self.save_settings()
 
     def toggle_minimize(self):
         self.is_minimized = not self.is_minimized
+        x = self.root.winfo_x()
+        y = self.root.winfo_y()
+        if x <= 0 and y <= 0:
+            x, y = self.win_x, self.win_y
+
         if self.is_minimized:
             self.btn_minimize.config(text="□")
             self.title_lbl.pack_forget()
             self.content_frame.pack_forget()
             self.mini_ticker_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 6))
-            self.root.geometry(f"{self.mini_width}x{self.mini_height}")
+            self.root.geometry(f"{self.mini_width}x{self.mini_height}+{x}+{y}")
         else:
             self.btn_minimize.config(text="─")
             self.mini_ticker_frame.pack_forget()
@@ -573,7 +597,11 @@ class DesktopOverlayHUD:
     def update_full_height(self):
         targets = self.target_mgr.get_targets()
         calc_h = 36 + (len(targets) * 38) + 64
-        self.root.geometry(f"{self.full_width}x{calc_h}")
+        x = self.root.winfo_x()
+        y = self.root.winfo_y()
+        if x <= 0 and y <= 0:
+            x, y = self.win_x, self.win_y
+        self.root.geometry(f"{self.full_width}x{calc_h}+{x}+{y}")
 
     def setup_mini_ticker(self):
         for w in self.mini_ticker_frame.winfo_children():
