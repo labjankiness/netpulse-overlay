@@ -12,6 +12,9 @@ import time
 import socket
 import threading
 import traceback
+import subprocess
+import re
+import platform
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -21,6 +24,7 @@ from tkinter import ttk, messagebox
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(APP_DIR, 'targets.json')
 LOG_FILE = os.path.join(APP_DIR, 'overlay.log')
+IS_WINDOWS = platform.system().lower() == 'windows'
 
 def log(msg):
     try:
@@ -150,7 +154,7 @@ class TargetManager:
                 return True
         return False
 
-# Network checks
+# Accurate reachability and DNS checks
 def check_dns(host):
     t0 = time.time()
     try:
@@ -159,7 +163,29 @@ def check_dns(host):
     except Exception as e:
         return {"status": "error", "time": round((time.time() - t0) * 1000), "error": str(e)}
 
-def check_tcp(host, port, timeout_sec=2.5):
+def ping_host(host, timeout_ms=1000):
+    t0 = time.time()
+    try:
+        if IS_WINDOWS:
+            cmd = ['ping', '-n', '1', '-w', str(timeout_ms), host]
+        else:
+            cmd = ['ping', '-c', '1', '-W', '1', host]
+
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=1.5)
+        out = res.stdout
+
+        # Extract millisecond timing from output
+        m = re.search(r'time[=<](\d+)ms', out, re.IGNORECASE)
+        if m:
+            return {"status": "ok", "latency": int(m.group(1))}
+        if 'reply from' in out.lower() or 'bytes from' in out.lower():
+            elapsed = max(1, round((time.time() - t0) * 1000))
+            return {"status": "ok", "latency": elapsed}
+    except Exception:
+        pass
+    return {"status": "timeout", "latency": timeout_ms}
+
+def check_tcp(host, port, timeout_sec=1.5):
     t0 = time.time()
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout_sec)
@@ -169,58 +195,60 @@ def check_tcp(host, port, timeout_sec=2.5):
         return {"status": "ok", "time": round((time.time() - t0) * 1000)}
     except socket.timeout:
         s.close()
-        return {"status": "timeout", "time": round(timeout_sec * 1000), "error": "Timeout"}
-    except Exception as e:
+        return {"status": "timeout", "time": round(timeout_sec * 1000)}
+    except Exception:
         s.close()
-        return {"status": "error", "time": round((time.time() - t0) * 1000), "error": str(e)}
+        return {"status": "error", "time": round((time.time() - t0) * 1000)}
 
-def check_http(url, timeout_sec=3.0):
+def check_http_fast(url, timeout_sec=2.0):
     t0 = time.time()
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NetPulseOverlay/1.0"}
-    )
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+    }
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             dur = round((time.time() - t0) * 1000)
-            return {"status": "ok" if resp.status < 400 else "warn", "time": dur, "code": resp.status}
+            return {"status": "ok", "time": dur, "code": resp.status}
     except urllib.error.HTTPError as e:
-        return {"status": "warn", "time": round((time.time() - t0) * 1000), "code": e.code}
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, socket.timeout):
-            return {"status": "timeout", "time": round(timeout_sec * 1000), "error": "Timeout"}
-        return {"status": "error", "time": round((time.time() - t0) * 1000), "error": str(e.reason)}
-    except Exception as e:
-        return {"status": "error", "time": round((time.time() - t0) * 1000), "error": str(e)}
+        dur = round((time.time() - t0) * 1000)
+        return {"status": "ok" if e.code < 500 else "error", "time": dur, "code": e.code}
+    except Exception:
+        return {"status": "timeout", "time": round(timeout_sec * 1000)}
 
 def probe_target(target):
     t_type = target.get("type", "web")
-    if t_type in ("web", "api"):
-        dns_res = check_dns(target["host"])
-        if dns_res["status"] == "error":
-            return {"status": "error", "latency": dns_res["time"], "detail": "DNS Fail"}
-        http_url = target.get("url", f"https://{target['host']}")
-        http_res = check_http(http_url)
-        lat = http_res["time"]
-        if http_res["status"] == "timeout":
-            return {"status": "timeout", "latency": lat, "detail": "Timeout"}
-        elif http_res["status"] == "error":
-            return {"status": "error", "latency": lat, "detail": "HTTP Err"}
+    host = target["host"]
+
+    # 1. DNS Resolution check (for domains)
+    dns_info = None
+    if not re.match(r'^\d+\.\d+\.\d+\.\d+$', host):
+        dns_res = check_dns(host)
+        if dns_res["status"] == "ok":
+            dns_info = f"DNS {dns_res['time']}ms"
         else:
-            status = "slow" if lat > 250 else "ok"
-            return {"status": status, "latency": lat, "detail": f"HTTP {http_res['code']}"}
-    elif t_type == "dns_ip":
-        port = target.get("port", 53)
-        tcp_res = check_tcp(target["host"], port)
+            return {"status": "error", "latency": dns_res["time"], "detail": "DNS Failed"}
+
+    # 2. Ping Reachability (most accurate real-time metric)
+    ping_res = ping_host(host)
+
+    if ping_res["status"] == "ok":
+        lat = ping_res["latency"]
+        status = "slow" if lat > 180 else "ok"
+        detail_parts = [f"Ping {lat}ms"]
+        if dns_info:
+            detail_parts.append(dns_info)
+        return {"status": status, "latency": lat, "detail": " | ".join(detail_parts)}
+
+    # Fallback to TCP if ping is filtered by firewall
+    port = target.get("port", 443 if t_type in ("web", "api") else 53)
+    tcp_res = check_tcp(host, port)
+    if tcp_res["status"] == "ok":
         lat = tcp_res["time"]
-        if tcp_res["status"] == "timeout":
-            return {"status": "timeout", "latency": lat, "detail": "Timeout"}
-        elif tcp_res["status"] == "error":
-            return {"status": "error", "latency": lat, "detail": "Refused"}
-        else:
-            status = "slow" if lat > 180 else "ok"
-            return {"status": status, "latency": lat, "detail": f"{port}/TCP"}
-    return {"status": "ok", "latency": 0, "detail": "OK"}
+        status = "slow" if lat > 200 else "ok"
+        return {"status": status, "latency": lat, "detail": f"TCP {port} ({lat}ms)"}
+
+    return {"status": "timeout", "latency": None, "detail": "Host Unreachable / Timeout"}
 
 
 class DesktopOverlayApp:
@@ -235,7 +263,6 @@ class DesktopOverlayApp:
         self.root.attributes("-topmost", True)
         self.root.configure(bg=COLOR_BG)
 
-        # 340 width, 380 height placed at (100, 100) for guaranteed visibility on any monitor
         self.root.geometry("340x380+100+100")
         self.root.minsize(300, 240)
 
@@ -244,7 +271,6 @@ class DesktopOverlayApp:
 
         self.setup_ui()
 
-        # Ensure window is active and brought to front
         self.root.update_idletasks()
         self.root.lift()
         self.root.focus_force()
@@ -252,7 +278,7 @@ class DesktopOverlayApp:
         # Polling thread
         self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
         self.poll_thread.start()
-        log("NetPulse UI initialized successfully")
+        log("NetPulse UI initialized with smart multi-probe engine")
 
     def setup_ui(self):
         # Header toolbar
@@ -293,7 +319,7 @@ class DesktopOverlayApp:
 
         # Bottom status bar
         self.status_bar = tk.Label(
-            self.root, text="Status: Probing targets every 3s | Always-on-top active",
+            self.root, text="Status: Real-time Ping & DNS probes active | Always-on-top",
             bg=COLOR_HEADER, fg=COLOR_MUTED, font=("Segoe UI", 7), anchor="w", padx=10, pady=4
         )
         self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
@@ -457,10 +483,10 @@ class DesktopOverlayApp:
 
             if status == "ok":
                 color = COLOR_GREEN
-                text = f"{lat}ms"
+                text = f"{lat}ms" if lat is not None else "OK"
             elif status == "slow":
                 color = COLOR_YELLOW
-                text = f"{lat}ms"
+                text = f"{lat}ms" if lat is not None else "SLOW"
                 has_slow = True
             elif status == "timeout":
                 color = COLOR_RED
