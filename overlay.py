@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
 NetPulse Desktop System Overlay
-A frameless, draggable, always-on-top HUD overlay with a 1-click minimize/collapse button.
+A frameless, draggable HUD with live 3-tier network stability monitoring.
+Features:
+- Pin / Unpin (Always-on-top toggle)
+- Translucency / Opacity toggle (Solid, Translucent, Glass)
+- 1-Click Minimize / Expand Ticker Pill
+- Right-click customization menu
+- Settings persistence
 """
 
 import os
@@ -22,6 +28,7 @@ from tkinter import ttk, messagebox
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(APP_DIR, 'targets.json')
+SETTINGS_FILE = os.path.join(APP_DIR, 'settings.json')
 LOG_FILE = os.path.join(APP_DIR, 'overlay.log')
 IS_WINDOWS = platform.system().lower() == 'windows'
 
@@ -111,6 +118,9 @@ DEFAULT_TARGETS = [
     }
 ]
 
+OPACITY_LEVELS = [0.85, 0.65, 1.0]  # Translucent (default), Glass, Solid
+OPACITY_LABELS = {0.85: "Translucent (85%)", 0.65: "Glass (65%)", 1.0: "Solid (100%)"}
+
 # Color Palette
 COLOR_BG = "#0b0f19"
 COLOR_HEADER = "#151e32"
@@ -198,7 +208,7 @@ class TargetManager:
                 return True
         return False
 
-# Network checks
+# Networking checks
 def check_dns(host):
     t0 = time.time()
     try:
@@ -294,41 +304,91 @@ class DesktopOverlayHUD:
         self.target_widgets = {}
         self.pill_widgets = {}
 
-        # Window settings: True frameless floating overlay
+        # Load customizable preferences
+        self.load_settings()
+
+        # Window settings
         self.root.title("NetPulse Overlay")
         self.root.overrideredirect(True)          # Frameless HUD
-        self.root.attributes("-topmost", True)      # Always on top
-        try:
-            self.root.attributes("-alpha", 0.94)    # Sleek dark glass
-        except Exception:
-            pass
+        self.apply_pin_state()
+        self.apply_opacity()
         self.root.configure(bg=COLOR_BORDER)
 
         # Default size and position
-        self.full_width = 320
-        self.mini_width = 460
+        self.full_width = 330
+        self.mini_width = 480
         self.mini_height = 34
 
-        # Position at (150, 150) for immediate visibility
         self.root.geometry(f"{self.full_width}x240+150+150")
 
-        # Dragging variables
         self.drag_x = 0
         self.drag_y = 0
 
         self.setup_ui()
+        self.setup_context_menu()
 
-        # Lift & maintain topmost
         self.root.update_idletasks()
         self.root.lift()
 
         # Polling thread
         self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
         self.poll_thread.start()
-        log("NetPulse Desktop HUD initialized with minimize control")
+        log("NetPulse Desktop HUD initialized with Pin and Translucency customization")
+
+    def load_settings(self):
+        self.is_pinned = True
+        self.opacity_index = 0  # 0.85 (Translucent)
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.is_pinned = data.get("pinned", True)
+                    op = data.get("opacity", 0.85)
+                    if op in OPACITY_LEVELS:
+                        self.opacity_index = OPACITY_LEVELS.index(op)
+            except Exception as e:
+                log(f"Settings load error: {e}")
+
+    def save_settings(self):
+        try:
+            with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "pinned": self.is_pinned,
+                    "opacity": OPACITY_LEVELS[self.opacity_index]
+                }, f, indent=2)
+        except Exception as e:
+            log(f"Settings save error: {e}")
+
+    def apply_pin_state(self):
+        self.root.attributes("-topmost", self.is_pinned)
+
+    def apply_opacity(self):
+        alpha = OPACITY_LEVELS[self.opacity_index]
+        try:
+            self.root.attributes("-alpha", alpha)
+        except Exception:
+            pass
+
+    def toggle_pin(self):
+        self.is_pinned = not self.is_pinned
+        self.apply_pin_state()
+        self.save_settings()
+        self.update_pin_buttons()
+
+    def toggle_opacity(self):
+        self.opacity_index = (self.opacity_index + 1) % len(OPACITY_LEVELS)
+        self.apply_opacity()
+        self.save_settings()
+
+    def update_pin_buttons(self):
+        pin_char = "📌" if self.is_pinned else "📍"
+        pin_color = COLOR_ACCENT if self.is_pinned else COLOR_MUTED
+        if hasattr(self, 'btn_pin_full'):
+            self.btn_pin_full.config(text=pin_char, fg=pin_color)
+        if hasattr(self, 'btn_pin_mini'):
+            self.btn_pin_mini.config(text=pin_char, fg=pin_color)
 
     def setup_ui(self):
-        # Outer container with border
         self.container = tk.Frame(self.root, bg=COLOR_BG, bd=0)
         self.container.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
 
@@ -339,15 +399,16 @@ class DesktopOverlayHUD:
 
         self.header.bind("<Button-1>", self.on_drag_start)
         self.header.bind("<B1-Motion>", self.on_drag_motion)
+        self.header.bind("<Button-3>", self.show_context_menu)
 
-        # Status pulse dot
+        # Pulse indicator
         self.pulse_canvas = tk.Canvas(self.header, width=12, height=12, bg=COLOR_HEADER, highlightthickness=0)
         self.pulse_circle = self.pulse_canvas.create_oval(2, 2, 10, 10, fill=COLOR_GREEN, outline="")
         self.pulse_canvas.pack(side=tk.LEFT, padx=(8, 4))
         self.pulse_canvas.bind("<Button-1>", self.on_drag_start)
         self.pulse_canvas.bind("<B1-Motion>", self.on_drag_motion)
 
-        # Title / Mini Ticker area
+        # Title
         self.title_lbl = tk.Label(
             self.header, text="NetPulse Overlay", bg=COLOR_HEADER, fg=COLOR_TEXT,
             font=("Segoe UI", 9, "bold")
@@ -356,37 +417,59 @@ class DesktopOverlayHUD:
         self.title_lbl.bind("<Button-1>", self.on_drag_start)
         self.title_lbl.bind("<B1-Motion>", self.on_drag_motion)
 
-        # Compact Ticker items (visible only when minimized)
+        # Compact Ticker Area (visible only when minimized)
         self.mini_ticker_frame = tk.Frame(self.header, bg=COLOR_HEADER)
         self.mini_ticker_frame.bind("<Button-1>", self.on_drag_start)
         self.mini_ticker_frame.bind("<B1-Motion>", self.on_drag_motion)
 
-        # Window Controls: Close (✕), Minimize (─), Add (+)
+        # --- Window Controls ---
+        # Close (✕)
         self.btn_close = tk.Label(
             self.header, text="✕", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 9), cursor="hand2", width=3
+            font=("Segoe UI", 9), cursor="hand2", width=2
         )
         self.btn_close.pack(side=tk.RIGHT, padx=(0, 4))
         self.btn_close.bind("<Button-1>", lambda e: self.close_app())
         self.btn_close.bind("<Enter>", lambda e: self.btn_close.config(fg=COLOR_RED))
         self.btn_close.bind("<Leave>", lambda e: self.btn_close.config(fg=COLOR_MUTED))
 
-        # Minimize / Collapse Button
+        # Minimize / Collapse Button (─ / □)
         self.btn_minimize = tk.Label(
             self.header, text="─", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 10, "bold"), cursor="hand2", width=3
+            font=("Segoe UI", 10, "bold"), cursor="hand2", width=2
         )
-        self.btn_minimize.pack(side=tk.RIGHT, padx=2)
+        self.btn_minimize.pack(side=tk.RIGHT, padx=1)
         self.btn_minimize.bind("<Button-1>", lambda e: self.toggle_minimize())
         self.btn_minimize.bind("<Enter>", lambda e: self.btn_minimize.config(fg=COLOR_TEXT))
         self.btn_minimize.bind("<Leave>", lambda e: self.btn_minimize.config(fg=COLOR_MUTED))
 
-        # Add target button (+)
+        # Pin / Unpin Button (📌 / 📍)
+        pin_char = "📌" if self.is_pinned else "📍"
+        pin_color = COLOR_ACCENT if self.is_pinned else COLOR_MUTED
+        self.btn_pin_full = tk.Label(
+            self.header, text=pin_char, bg=COLOR_HEADER, fg=pin_color,
+            font=("Segoe UI", 9), cursor="hand2", width=2
+        )
+        self.btn_pin_full.pack(side=tk.RIGHT, padx=1)
+        self.btn_pin_full.bind("<Button-1>", lambda e: self.toggle_pin())
+        self.btn_pin_full.bind("<Enter>", lambda e: self.btn_pin_full.config(fg=COLOR_ACCENT))
+
+        # Translucency Toggle Button (🌓)
+        self.btn_trans_full = tk.Label(
+            self.header, text="🌓", bg=COLOR_HEADER, fg=COLOR_MUTED,
+            font=("Segoe UI", 9), cursor="hand2", width=2
+        )
+        self.btn_trans_full.pack(side=tk.RIGHT, padx=1)
+        self.btn_trans_full.bind("<Button-1>", lambda e: self.toggle_opacity())
+        self.btn_trans_full.bind("<Enter>", lambda e: self.btn_trans_full.config(fg=COLOR_TEXT))
+        self.btn_trans_full.bind("<Leave>", lambda e: self.btn_trans_full.config(fg=COLOR_MUTED))
+
+        # Add Target Button (+)
         self.btn_add = tk.Label(
             self.header, text="+", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 11, "bold"), cursor="hand2", width=3
+            font=("Segoe UI", 10, "bold"), cursor="hand2", width=2
         )
-        self.btn_add.pack(side=tk.RIGHT, padx=2)
+        self.btn_add.pack(side=tk.RIGHT, padx=1)
         self.btn_add.bind("<Button-1>", lambda e: self.open_add_dialog())
         self.btn_add.bind("<Enter>", lambda e: self.btn_add.config(fg=COLOR_ACCENT))
         self.btn_add.bind("<Leave>", lambda e: self.btn_add.config(fg=COLOR_MUTED))
@@ -394,9 +477,26 @@ class DesktopOverlayHUD:
         # Content frame for full view cards
         self.content_frame = tk.Frame(self.container, bg=COLOR_BG)
         self.content_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        self.content_frame.bind("<Button-3>", self.show_context_menu)
 
         self.render_target_list()
         self.setup_mini_ticker()
+
+    def setup_context_menu(self):
+        self.context_menu = tk.Menu(self.root, tearoff=0, bg=COLOR_CARD, fg=COLOR_TEXT, activebackground=COLOR_ACCENT, activeforeground="white")
+        self.context_menu.add_command(label="📌 Toggle Pin (Always On Top)", command=self.toggle_pin)
+        self.context_menu.add_command(label="🌓 Cycle Translucency", command=self.toggle_opacity)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="➕ Add New Target...", command=self.open_add_dialog)
+        self.context_menu.add_command(label="─ Minimize / Expand", command=self.toggle_minimize)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="✕ Close Overlay", command=self.close_app)
+
+    def show_context_menu(self, event):
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
 
     def on_drag_start(self, event):
         self.drag_x = event.x_root - self.root.winfo_x()
@@ -410,21 +510,20 @@ class DesktopOverlayHUD:
     def toggle_minimize(self):
         self.is_minimized = not self.is_minimized
         if self.is_minimized:
-            # Collapse to minimal floating ticker pill
             self.btn_minimize.config(text="□")
             self.title_lbl.pack_forget()
             self.content_frame.pack_forget()
-            self.mini_ticker_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 8))
+            self.mini_ticker_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 6))
             self.root.geometry(f"{self.mini_width}x{self.mini_height}")
         else:
-            # Expand to full cards view
             self.btn_minimize.config(text="─")
             self.mini_ticker_frame.pack_forget()
             self.title_lbl.pack(side=tk.LEFT)
             self.content_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
             self.update_full_height()
 
-        self.root.lift()
+        if self.is_pinned:
+            self.root.lift()
 
     def update_full_height(self):
         targets = self.target_mgr.get_targets()
@@ -443,18 +542,21 @@ class DesktopOverlayHUD:
             box.pack(side=tk.LEFT, padx=3)
             box.bind("<Button-1>", self.on_drag_start)
             box.bind("<B1-Motion>", self.on_drag_motion)
+            box.bind("<Button-3>", self.show_context_menu)
 
             c = tk.Canvas(box, width=7, height=7, bg=COLOR_HEADER, highlightthickness=0)
             dot = c.create_oval(1, 1, 6, 6, fill=COLOR_MUTED, outline="")
             c.pack(side=tk.LEFT, padx=(0, 2))
             c.bind("<Button-1>", self.on_drag_start)
             c.bind("<B1-Motion>", self.on_drag_motion)
+            c.bind("<Button-3>", self.show_context_menu)
 
             short = t.get("short", t["name"][:4])
             lbl = tk.Label(box, text=f"{short}:--", bg=COLOR_HEADER, fg=COLOR_TEXT, font=("Segoe UI", 7))
             lbl.pack(side=tk.LEFT)
             lbl.bind("<Button-1>", self.on_drag_start)
             lbl.bind("<B1-Motion>", self.on_drag_motion)
+            lbl.bind("<Button-3>", self.show_context_menu)
 
             self.pill_widgets[tid] = {"dot": dot, "canvas": c, "lbl": lbl, "short": short}
 
@@ -463,6 +565,7 @@ class DesktopOverlayHUD:
                 sep.pack(side=tk.LEFT, padx=1)
                 sep.bind("<Button-1>", self.on_drag_start)
                 sep.bind("<B1-Motion>", self.on_drag_motion)
+                sep.bind("<Button-3>", self.show_context_menu)
 
     def render_target_list(self):
         for widget in self.content_frame.winfo_children():
@@ -474,6 +577,7 @@ class DesktopOverlayHUD:
             tid = t["id"]
             row = tk.Frame(self.content_frame, bg=COLOR_CARD, bd=1, relief="solid")
             row.pack(fill=tk.X, pady=2, ipady=3)
+            row.bind("<Button-3>", self.show_context_menu)
 
             # Left dot
             canvas = tk.Canvas(row, width=10, height=10, bg=COLOR_CARD, highlightthickness=0)
@@ -483,6 +587,7 @@ class DesktopOverlayHUD:
             # Info block
             info_frame = tk.Frame(row, bg=COLOR_CARD)
             info_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            info_frame.bind("<Button-3>", self.show_context_menu)
 
             tier_tag = ""
             if tid == "lan":
