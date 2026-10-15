@@ -1,0 +1,42 @@
+[
+  {
+    "id": "ddg",
+    "name": "DuckDuckGo Web",
+    "host": "duckduckgo.com",
+    "url": "https://duckduckgo.com",
+    "type": "web",
+    "deletable": false
+  },
+  {
+    "id": "ddg_api",
+    "name": "DuckDuckGo API",
+    "host": "api.duckduckgo.com",
+    "url": "https://api.duckduckgo.com/?q=test&format=json",
+    "type": "api",
+    "deletable": false
+  },
+  {
+    "id": "cf_dns",
+    "name": "Cloudflare DNS",
+    "host": "1.1.1.1",
+    "port": 53,
+    "type": "dns_ip",
+    "deletable": false
+  },
+  {
+    "id": "google_dns",
+    "name": "Google DNS",
+    "host": "8.8.8.8",
+    "port": 53,
+    "type": "dns_ip",
+    "deletable": false
+  },
+  {
+    "id": "github",
+    "name": "GitHub (Baseline Check)",
+    "host": "github.com",
+    "url": "https://github.com",
+    "type": "web",
+    "deletable": false
+  }
+]
