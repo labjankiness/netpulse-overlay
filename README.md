@@ -14,6 +14,11 @@ Monitors connectivity, latency trends, and DNS resolution to your local gateway,
   - **Tier 2: [DNS] Resolvers**: Probes Cloudflare (`1.1.1.1`) and Google DNS (`8.8.8.8`) to catch DNS stalls or ISP poisoning.
   - **Tier 3: [Web] Search & Internet**: Monitors DuckDuckGo and GitHub to distinguish single-service outages from whole-internet drops.
 
+- **Downdetector-Style Live Spike & Outage Timelines**:
+  - **Mini Sparklines**: Individual latency sparkline charts next to each target.
+  - **Aggregate Stability Timeline**: 25-probe time window displaying normal latency bars in green/yellow vs. full-height **red spike bars** whenever timeouts or packet drops occur.
+  - **Live Spike Counter**: Real-time counter displaying overall health (e.g., `100% Stable (0 Spikes)` or `3 Total Spikes`).
+
 - **Pin / Unpin (Always-on-Top Toggle)**:
   - Click **`📌`** in the header to toggle between:
     - **Pinned (`📌`)**: Stays floating on top of all applications, games, and browsers.

@@ -3,6 +3,7 @@
 NetPulse Desktop System Overlay
 A frameless, draggable HUD with live 3-tier network stability monitoring.
 Features:
+- Downdetector-style live spike & stability timeline graphs
 - Pin / Unpin (Always-on-top toggle)
 - Translucency / Opacity toggle (Solid, Translucent, Glass)
 - 1-Click Minimize / Expand Ticker Pill
@@ -118,7 +119,7 @@ DEFAULT_TARGETS = [
     }
 ]
 
-OPACITY_LEVELS = [0.85, 0.65, 1.0]  # Translucent (default), Glass, Solid
+OPACITY_LEVELS = [0.85, 0.65, 1.0]
 OPACITY_LABELS = {0.85: "Translucent (85%)", 0.65: "Glass (65%)", 1.0: "Solid (100%)"}
 
 # Color Palette
@@ -132,12 +133,15 @@ COLOR_GREEN = "#10b981"
 COLOR_YELLOW = "#f59e0b"
 COLOR_RED = "#ef4444"
 COLOR_ACCENT = "#6366f1"
+COLOR_GRAPH_BG = "#0d1322"
 
 class TargetManager:
     def __init__(self, filepath):
         self.filepath = filepath
         self.lock = threading.Lock()
         self.targets = []
+        self.history = {}  # tid -> list of {'latency': int, 'status': str}
+        self.total_spikes = 0
         self.load()
 
     def load(self):
@@ -205,10 +209,27 @@ class TargetManager:
             self.targets = [t for t in self.targets if not (t["id"] == tid and t.get("deletable", True))]
             if len(self.targets) < initial:
                 self.save_unlocked()
+                if tid in self.history:
+                    del self.history[tid]
                 return True
         return False
 
-# Networking checks
+    def record_probe(self, tid, status, latency):
+        with self.lock:
+            if tid not in self.history:
+                self.history[tid] = []
+            self.history[tid].append({"status": status, "latency": latency})
+            if len(self.history[tid]) > 25:
+                self.history[tid].pop(0)
+
+            if status in ("timeout", "error"):
+                self.total_spikes += 1
+
+    def get_history(self, tid):
+        with self.lock:
+            return list(self.history.get(tid, []))
+
+# Network checks
 def check_dns(host):
     t0 = time.time()
     try:
@@ -304,7 +325,6 @@ class DesktopOverlayHUD:
         self.target_widgets = {}
         self.pill_widgets = {}
 
-        # Load customizable preferences
         self.load_settings()
 
         # Window settings
@@ -315,11 +335,11 @@ class DesktopOverlayHUD:
         self.root.configure(bg=COLOR_BORDER)
 
         # Default size and position
-        self.full_width = 330
+        self.full_width = 350
         self.mini_width = 480
         self.mini_height = 34
 
-        self.root.geometry(f"{self.full_width}x240+150+150")
+        self.root.geometry(f"{self.full_width}x320+150+150")
 
         self.drag_x = 0
         self.drag_y = 0
@@ -333,11 +353,11 @@ class DesktopOverlayHUD:
         # Polling thread
         self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
         self.poll_thread.start()
-        log("NetPulse Desktop HUD initialized with Pin and Translucency customization")
+        log("NetPulse Desktop HUD initialized with Downdetector-style spike graphs")
 
     def load_settings(self):
         self.is_pinned = True
-        self.opacity_index = 0  # 0.85 (Translucent)
+        self.opacity_index = 0
         if os.path.exists(SETTINGS_FILE):
             try:
                 with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
@@ -385,8 +405,6 @@ class DesktopOverlayHUD:
         pin_color = COLOR_ACCENT if self.is_pinned else COLOR_MUTED
         if hasattr(self, 'btn_pin_full'):
             self.btn_pin_full.config(text=pin_char, fg=pin_color)
-        if hasattr(self, 'btn_pin_mini'):
-            self.btn_pin_mini.config(text=pin_char, fg=pin_color)
 
     def setup_ui(self):
         self.container = tk.Frame(self.root, bg=COLOR_BG, bd=0)
@@ -422,8 +440,7 @@ class DesktopOverlayHUD:
         self.mini_ticker_frame.bind("<Button-1>", self.on_drag_start)
         self.mini_ticker_frame.bind("<B1-Motion>", self.on_drag_motion)
 
-        # --- Window Controls ---
-        # Close (✕)
+        # Controls
         self.btn_close = tk.Label(
             self.header, text="✕", bg=COLOR_HEADER, fg=COLOR_MUTED,
             font=("Segoe UI", 9), cursor="hand2", width=2
@@ -433,7 +450,6 @@ class DesktopOverlayHUD:
         self.btn_close.bind("<Enter>", lambda e: self.btn_close.config(fg=COLOR_RED))
         self.btn_close.bind("<Leave>", lambda e: self.btn_close.config(fg=COLOR_MUTED))
 
-        # Minimize / Collapse Button (─ / □)
         self.btn_minimize = tk.Label(
             self.header, text="─", bg=COLOR_HEADER, fg=COLOR_MUTED,
             font=("Segoe UI", 10, "bold"), cursor="hand2", width=2
@@ -443,7 +459,6 @@ class DesktopOverlayHUD:
         self.btn_minimize.bind("<Enter>", lambda e: self.btn_minimize.config(fg=COLOR_TEXT))
         self.btn_minimize.bind("<Leave>", lambda e: self.btn_minimize.config(fg=COLOR_MUTED))
 
-        # Pin / Unpin Button (📌 / 📍)
         pin_char = "📌" if self.is_pinned else "📍"
         pin_color = COLOR_ACCENT if self.is_pinned else COLOR_MUTED
         self.btn_pin_full = tk.Label(
@@ -454,7 +469,6 @@ class DesktopOverlayHUD:
         self.btn_pin_full.bind("<Button-1>", lambda e: self.toggle_pin())
         self.btn_pin_full.bind("<Enter>", lambda e: self.btn_pin_full.config(fg=COLOR_ACCENT))
 
-        # Translucency Toggle Button (🌓)
         self.btn_trans_full = tk.Label(
             self.header, text="🌓", bg=COLOR_HEADER, fg=COLOR_MUTED,
             font=("Segoe UI", 9), cursor="hand2", width=2
@@ -464,7 +478,6 @@ class DesktopOverlayHUD:
         self.btn_trans_full.bind("<Enter>", lambda e: self.btn_trans_full.config(fg=COLOR_TEXT))
         self.btn_trans_full.bind("<Leave>", lambda e: self.btn_trans_full.config(fg=COLOR_MUTED))
 
-        # Add Target Button (+)
         self.btn_add = tk.Label(
             self.header, text="+", bg=COLOR_HEADER, fg=COLOR_MUTED,
             font=("Segoe UI", 10, "bold"), cursor="hand2", width=2
@@ -478,6 +491,38 @@ class DesktopOverlayHUD:
         self.content_frame = tk.Frame(self.container, bg=COLOR_BG)
         self.content_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
         self.content_frame.bind("<Button-3>", self.show_context_menu)
+
+        # Global Spike / Outage Timeline (Downdetector style)
+        self.timeline_frame = tk.Frame(self.content_frame, bg=COLOR_CARD, bd=1, relief="solid")
+        self.timeline_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(6, 2))
+        self.timeline_frame.bind("<Button-3>", self.show_context_menu)
+
+        self.timeline_header = tk.Frame(self.timeline_frame, bg=COLOR_CARD)
+        self.timeline_header.pack(fill=tk.X, padx=6, pady=(4, 2))
+
+        self.timeline_title = tk.Label(
+            self.timeline_header, text="OUTAGE & SPIKE TIMELINE (LAST 25 CHECKS)",
+            bg=COLOR_CARD, fg=COLOR_MUTED, font=("Segoe UI", 7, "bold")
+        )
+        self.timeline_title.pack(side=tk.LEFT)
+
+        self.spike_stat_lbl = tk.Label(
+            self.timeline_header, text="0 Spikes Detected",
+            bg=COLOR_CARD, fg=COLOR_GREEN, font=("Segoe UI", 7, "bold")
+        )
+        self.spike_stat_lbl.pack(side=tk.RIGHT)
+
+        # Downdetector-style spike timeline canvas
+        self.timeline_canvas = tk.Canvas(
+            self.timeline_frame, height=28, bg=COLOR_GRAPH_BG, highlightthickness=0
+        )
+        self.timeline_canvas.pack(fill=tk.X, padx=6, pady=(0, 4))
+        self.timeline_canvas.bind("<Button-3>", self.show_context_menu)
+
+        # Cards container
+        self.cards_frame = tk.Frame(self.content_frame, bg=COLOR_BG)
+        self.cards_frame.pack(fill=tk.BOTH, expand=True)
+        self.cards_frame.bind("<Button-3>", self.show_context_menu)
 
         self.render_target_list()
         self.setup_mini_ticker()
@@ -527,7 +572,7 @@ class DesktopOverlayHUD:
 
     def update_full_height(self):
         targets = self.target_mgr.get_targets()
-        calc_h = 36 + (len(targets) * 38) + 12
+        calc_h = 36 + (len(targets) * 38) + 64
         self.root.geometry(f"{self.full_width}x{calc_h}")
 
     def setup_mini_ticker(self):
@@ -568,21 +613,21 @@ class DesktopOverlayHUD:
                 sep.bind("<Button-3>", self.show_context_menu)
 
     def render_target_list(self):
-        for widget in self.content_frame.winfo_children():
+        for widget in self.cards_frame.winfo_children():
             widget.destroy()
         self.target_widgets.clear()
 
         targets = self.target_mgr.get_targets()
         for t in targets:
             tid = t["id"]
-            row = tk.Frame(self.content_frame, bg=COLOR_CARD, bd=1, relief="solid")
-            row.pack(fill=tk.X, pady=2, ipady=3)
+            row = tk.Frame(self.cards_frame, bg=COLOR_CARD, bd=1, relief="solid")
+            row.pack(fill=tk.X, pady=2, ipady=2)
             row.bind("<Button-3>", self.show_context_menu)
 
-            # Left dot
+            # Status dot
             canvas = tk.Canvas(row, width=10, height=10, bg=COLOR_CARD, highlightthickness=0)
             dot = canvas.create_oval(1, 1, 9, 9, fill=COLOR_MUTED, outline="")
-            canvas.pack(side=tk.LEFT, padx=(8, 6))
+            canvas.pack(side=tk.LEFT, padx=(6, 4))
 
             # Info block
             info_frame = tk.Frame(row, bg=COLOR_CARD)
@@ -607,9 +652,13 @@ class DesktopOverlayHUD:
             )
             detail_lbl.pack(anchor="w")
 
+            # Mini sparkline canvas (Downdetector style)
+            spark_canvas = tk.Canvas(row, width=64, height=18, bg=COLOR_GRAPH_BG, highlightthickness=0)
+            spark_canvas.pack(side=tk.LEFT, padx=(4, 6))
+
             # Right metrics
             right_frame = tk.Frame(row, bg=COLOR_CARD)
-            right_frame.pack(side=tk.RIGHT, padx=(4, 8))
+            right_frame.pack(side=tk.RIGHT, padx=(2, 6))
 
             lat_lbl = tk.Label(
                 right_frame, text="--ms", bg=COLOR_CARD, fg=COLOR_MUTED,
@@ -622,7 +671,7 @@ class DesktopOverlayHUD:
                     right_frame, text="✕", bg=COLOR_CARD, fg=COLOR_MUTED,
                     font=("Segoe UI", 8), cursor="hand2"
                 )
-                del_btn.pack(side=tk.RIGHT, padx=(0, 6))
+                del_btn.pack(side=tk.RIGHT, padx=(0, 4))
                 del_btn.bind("<Button-1>", lambda e, target_id=tid: self.delete_target(target_id))
                 del_btn.bind("<Enter>", lambda e, b=del_btn: b.config(fg=COLOR_RED))
                 del_btn.bind("<Leave>", lambda e, b=del_btn: b.config(fg=COLOR_MUTED))
@@ -630,6 +679,7 @@ class DesktopOverlayHUD:
             self.target_widgets[tid] = {
                 "canvas": canvas,
                 "dot": dot,
+                "spark_canvas": spark_canvas,
                 "lat_lbl": lat_lbl,
                 "detail_lbl": detail_lbl,
                 "row": row
@@ -637,6 +687,82 @@ class DesktopOverlayHUD:
 
         if not self.is_minimized:
             self.update_full_height()
+
+    def draw_sparkline(self, canvas, history):
+        canvas.delete("all")
+        if not history:
+            return
+
+        w = canvas.winfo_width() or 64
+        h = canvas.winfo_height() or 18
+        bar_w = max(2, w / 25)
+
+        for i, item in enumerate(history[-25:]):
+            x0 = i * bar_w
+            x1 = x0 + bar_w - 1
+            status = item.get("status")
+            lat = item.get("latency")
+
+            if status in ("timeout", "error"):
+                # Downdetector-style RED OUTAGE SPIKE (reaches top)
+                canvas.create_rectangle(x0, 1, x1, h, fill=COLOR_RED, outline="")
+            else:
+                lat_val = lat if lat is not None else 10
+                bar_h = max(2, min(h - 2, int((lat_val / 150) * (h - 2))))
+                y0 = h - bar_h
+                color = COLOR_GREEN if lat_val < 80 else COLOR_YELLOW
+                canvas.create_rectangle(x0, y0, x1, h, fill=color, outline="")
+
+    def draw_aggregate_timeline(self):
+        canvas = self.timeline_canvas
+        canvas.delete("all")
+
+        w = canvas.winfo_width() or 300
+        h = canvas.winfo_height() or 28
+
+        # Draw baseline indicator line
+        canvas.create_line(0, h - 6, w, h - 6, fill="#1c2842", dash=(2, 2))
+
+        targets = self.target_mgr.get_targets()
+        bar_w = max(4, w / 25)
+        any_spike_in_window = 0
+
+        for col in range(25):
+            x0 = col * bar_w
+            x1 = x0 + bar_w - 1
+
+            # Aggregate status across all targets for this time column
+            col_has_timeout = False
+            col_max_lat = 0
+
+            for t in targets:
+                hist = self.target_mgr.get_history(t["id"])
+                idx = len(hist) - 25 + col
+                if 0 <= idx < len(hist):
+                    item = hist[idx]
+                    if item.get("status") in ("timeout", "error"):
+                        col_has_timeout = True
+                    lat = item.get("latency") or 0
+                    if lat > col_max_lat:
+                        col_max_lat = lat
+
+            if col_has_timeout:
+                # Big Downdetector spike bar
+                canvas.create_rectangle(x0, 2, x1, h, fill=COLOR_RED, outline="")
+                any_spike_in_window += 1
+            elif col_max_lat > 0:
+                bar_h = max(3, min(h - 4, int((col_max_lat / 120) * (h - 4))))
+                y0 = h - bar_h
+                color = COLOR_GREEN if col_max_lat < 70 else COLOR_YELLOW
+                canvas.create_rectangle(x0, y0, x1, h, fill=color, outline="")
+            else:
+                canvas.create_rectangle(x0, h - 3, x1, h, fill="#1f293d", outline="")
+
+        total_spikes = self.target_mgr.total_spikes
+        if total_spikes > 0:
+            self.spike_stat_lbl.config(text=f"{total_spikes} Total Spikes", fg=COLOR_RED)
+        else:
+            self.spike_stat_lbl.config(text="100% Stable (0 Spikes)", fg=COLOR_GREEN)
 
     def delete_target(self, tid):
         if messagebox.askyesno("NetPulse", "Remove target from monitor?"):
@@ -689,7 +815,9 @@ class DesktopOverlayHUD:
             for t in targets:
                 if not self.running:
                     break
-                results[t["id"]] = probe_target(t)
+                res = probe_target(t)
+                results[t["id"]] = res
+                self.target_mgr.record_probe(t["id"], res["status"], res["latency"])
                 time.sleep(0.08)
 
             if self.running:
@@ -721,18 +849,25 @@ class DesktopOverlayHUD:
                 text = "ERROR"
                 has_error = True
 
-            # Full view update
+            # Full view card update
             if tid in self.target_widgets:
                 w = self.target_widgets[tid]
                 w["canvas"].itemconfig(w["dot"], fill=color)
                 w["lat_lbl"].config(text=text, fg=color)
                 w["detail_lbl"].config(text=res.get("detail", ""))
+                # Draw sparkline
+                hist = self.target_mgr.get_history(tid)
+                self.draw_sparkline(w["spark_canvas"], hist)
 
             # Minimized view update
             if tid in self.pill_widgets:
                 pw = self.pill_widgets[tid]
                 pw["canvas"].itemconfig(pw["dot"], fill=color)
                 pw["lbl"].config(text=f"{pw['short']}:{text}", fg=color if status != 'ok' else COLOR_TEXT)
+
+        # Update Aggregate Timeline
+        if not self.is_minimized:
+            self.draw_aggregate_timeline()
 
         if has_error:
             self.pulse_canvas.itemconfig(self.pulse_circle, fill=COLOR_RED)
@@ -747,7 +882,7 @@ class DesktopOverlayHUD:
 
 
 def main():
-    log("Starting NetPulse Desktop HUD main()")
+    log("Starting NetPulse Desktop HUD main() with Downdetector graphs")
     try:
         root = tk.Tk()
         app = DesktopOverlayHUD(root)
