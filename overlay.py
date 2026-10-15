@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 NetPulse Desktop System Overlay
-A frameless, draggable, always-on-top system overlay HUD written in pure Python (Tkinter).
+A real-time, always-on-top network & DNS stability overlay HUD written in pure Python (Tkinter).
 Runs natively on your desktop without needing a web browser.
 """
 
@@ -11,13 +11,23 @@ import json
 import time
 import socket
 import threading
+import traceback
 import urllib.request
 import urllib.parse
 import urllib.error
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'targets.json')
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(APP_DIR, 'targets.json')
+LOG_FILE = os.path.join(APP_DIR, 'overlay.log')
+
+def log(msg):
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
 
 DEFAULT_TARGETS = [
     {
@@ -63,11 +73,11 @@ DEFAULT_TARGETS = [
 ]
 
 # Color Palette
-COLOR_BG = "#0d111a"
-COLOR_HEADER = "#151c2c"
-COLOR_CARD = "#121824"
-COLOR_BORDER = "#253046"
-COLOR_TEXT = "#f1f5f9"
+COLOR_BG = "#0f172a"
+COLOR_HEADER = "#1e293b"
+COLOR_CARD = "#1e293b"
+COLOR_BORDER = "#334155"
+COLOR_TEXT = "#f8fafc"
 COLOR_MUTED = "#94a3b8"
 COLOR_GREEN = "#10b981"
 COLOR_YELLOW = "#f59e0b"
@@ -89,12 +99,8 @@ class TargetManager:
                         self.targets = json.load(f)
                         return
                 except Exception as e:
-                    print(f"Error loading {self.filepath}: {e}")
+                    log(f"Error loading targets: {e}")
             self.targets = [dict(t) for t in DEFAULT_TARGETS]
-            self.save_unlocked()
-
-    def save(self):
-        with self.lock:
             self.save_unlocked()
 
     def save_unlocked(self):
@@ -102,7 +108,7 @@ class TargetManager:
             with open(self.filepath, 'w', encoding='utf-8') as f:
                 json.dump(self.targets, f, indent=2)
         except Exception as e:
-            print(f"Error saving {self.filepath}: {e}")
+            log(f"Error saving targets: {e}")
 
     def get_targets(self):
         with self.lock:
@@ -144,7 +150,7 @@ class TargetManager:
                 return True
         return False
 
-# Networking helpers
+# Network checks
 def check_dns(host):
     t0 = time.time()
     try:
@@ -192,14 +198,14 @@ def probe_target(target):
     if t_type in ("web", "api"):
         dns_res = check_dns(target["host"])
         if dns_res["status"] == "error":
-            return {"status": "error", "latency": dns_res["time"], "detail": "DNS Failure"}
+            return {"status": "error", "latency": dns_res["time"], "detail": "DNS Fail"}
         http_url = target.get("url", f"https://{target['host']}")
         http_res = check_http(http_url)
         lat = http_res["time"]
         if http_res["status"] == "timeout":
             return {"status": "timeout", "latency": lat, "detail": "Timeout"}
         elif http_res["status"] == "error":
-            return {"status": "error", "latency": lat, "detail": http_res.get("error", "Error")[:16]}
+            return {"status": "error", "latency": lat, "detail": "HTTP Err"}
         else:
             status = "slow" if lat > 250 else "ok"
             return {"status": status, "latency": lat, "detail": f"HTTP {http_res['code']}"}
@@ -210,7 +216,7 @@ def probe_target(target):
         if tcp_res["status"] == "timeout":
             return {"status": "timeout", "latency": lat, "detail": "Timeout"}
         elif tcp_res["status"] == "error":
-            return {"status": "error", "latency": lat, "detail": "Conn Refused"}
+            return {"status": "error", "latency": lat, "detail": "Refused"}
         else:
             status = "slow" if lat > 180 else "ok"
             return {"status": status, "latency": lat, "detail": f"{port}/TCP"}
@@ -221,102 +227,95 @@ class DesktopOverlayApp:
     def __init__(self, root):
         self.root = root
         self.target_mgr = TargetManager(CONFIG_FILE)
-        self.is_compact = False
         self.running = True
-        self.target_results = {}  # tid -> probe dict
-        self.target_widgets = {}  # tid -> dict of widgets
+        self.frameless = False
+        self.target_widgets = {}
 
-        # Window settings for real system overlay
-        self.root.title("NetPulse System Overlay")
-        self.root.overrideredirect(True)          # Frameless overlay
-        self.root.attributes("-topmost", True)      # Always on top of all windows
-        try:
-            self.root.attributes("-alpha", 0.93)    # Modern glass semi-transparency
-        except Exception:
-            pass
-        self.root.configure(bg=COLOR_BORDER)
+        self.root.title("NetPulse Overlay")
+        self.root.attributes("-topmost", True)
+        self.root.configure(bg=COLOR_BG)
 
-        # Position top-right corner of screen by default
-        screen_w = self.root.winfo_screenwidth()
-        overlay_w = 280
-        overlay_h = 240
-        x_pos = max(20, screen_w - overlay_w - 30)
-        y_pos = 40
-        self.root.geometry(f"{overlay_w}x{overlay_h}+{x_pos}+{y_pos}")
+        # 340 width, 380 height placed at (100, 100) for guaranteed visibility on any monitor
+        self.root.geometry("340x380+100+100")
+        self.root.minsize(300, 240)
 
-        # Dragging variables
         self.drag_x = 0
         self.drag_y = 0
 
         self.setup_ui()
 
-        # Start background polling thread
+        # Ensure window is active and brought to front
+        self.root.update_idletasks()
+        self.root.lift()
+        self.root.focus_force()
+
+        # Polling thread
         self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
         self.poll_thread.start()
+        log("NetPulse UI initialized successfully")
 
     def setup_ui(self):
-        # Outer container with sleek border
-        self.main_frame = tk.Frame(self.root, bg=COLOR_BG, bd=0)
-        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
-
-        # Top Header Bar (Draggable handle)
-        self.header = tk.Frame(self.main_frame, bg=COLOR_HEADER, height=32)
+        # Header toolbar
+        self.header = tk.Frame(self.root, bg=COLOR_HEADER, height=36)
         self.header.pack(fill=tk.X, side=tk.TOP)
         self.header.pack_propagate(False)
 
-        # Enable dragging anywhere on the header
-        self.header.bind("<Button-1>", self.on_drag_start)
-        self.header.bind("<B1-Motion>", self.on_drag_motion)
-
-        # Status pulse icon
-        self.pulse_canvas = tk.Canvas(self.header, width=12, height=12, bg=COLOR_HEADER, highlightthickness=0)
-        self.pulse_circle = self.pulse_canvas.create_oval(2, 2, 10, 10, fill=COLOR_GREEN, outline="")
+        # Pulse circle
+        self.pulse_canvas = tk.Canvas(self.header, width=14, height=14, bg=COLOR_HEADER, highlightthickness=0)
+        self.pulse_circle = self.pulse_canvas.create_oval(2, 2, 12, 12, fill=COLOR_GREEN, outline="")
         self.pulse_canvas.pack(side=tk.LEFT, padx=(10, 6))
-        self.pulse_canvas.bind("<Button-1>", self.on_drag_start)
-        self.pulse_canvas.bind("<B1-Motion>", self.on_drag_motion)
 
         # Title
-        self.title_label = tk.Label(
+        self.title_lbl = tk.Label(
             self.header, text="NetPulse Overlay", bg=COLOR_HEADER, fg=COLOR_TEXT,
             font=("Segoe UI", 9, "bold")
         )
-        self.title_label.pack(side=tk.LEFT)
-        self.title_label.bind("<Button-1>", self.on_drag_start)
-        self.title_label.bind("<B1-Motion>", self.on_drag_motion)
+        self.title_lbl.pack(side=tk.LEFT)
 
-        # Window Controls: Add (+), Compact (_), Close (X)
-        self.btn_close = tk.Label(
-            self.header, text="✕", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 9), cursor="hand2", width=3
+        # Action Buttons
+        self.btn_add = tk.Button(
+            self.header, text="+ Add", bg=COLOR_ACCENT, fg="white",
+            font=("Segoe UI", 8, "bold"), bd=0, padx=8, pady=2, cursor="hand2",
+            command=self.open_add_dialog
         )
-        self.btn_close.pack(side=tk.RIGHT, padx=2)
-        self.btn_close.bind("<Button-1>", lambda e: self.close_app())
-        self.btn_close.bind("<Enter>", lambda e: self.btn_close.config(fg=COLOR_RED))
-        self.btn_close.bind("<Leave>", lambda e: self.btn_close.config(fg=COLOR_MUTED))
+        self.btn_add.pack(side=tk.RIGHT, padx=6)
 
-        self.btn_compact = tk.Label(
-            self.header, text="─", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 9), cursor="hand2", width=3
+        self.btn_border = tk.Button(
+            self.header, text="Frameless", bg=COLOR_BORDER, fg=COLOR_TEXT,
+            font=("Segoe UI", 8), bd=0, padx=6, pady=2, cursor="hand2",
+            command=self.toggle_frameless
         )
-        self.btn_compact.pack(side=tk.RIGHT, padx=2)
-        self.btn_compact.bind("<Button-1>", lambda e: self.toggle_compact())
-        self.btn_compact.bind("<Enter>", lambda e: self.btn_compact.config(fg=COLOR_TEXT))
-        self.btn_compact.bind("<Leave>", lambda e: self.btn_compact.config(fg=COLOR_MUTED))
+        self.btn_border.pack(side=tk.RIGHT, padx=2)
 
-        self.btn_add = tk.Label(
-            self.header, text="+", bg=COLOR_HEADER, fg=COLOR_MUTED,
-            font=("Segoe UI", 11, "bold"), cursor="hand2", width=3
+        # Container for target cards
+        self.content_frame = tk.Frame(self.root, bg=COLOR_BG)
+        self.content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Bottom status bar
+        self.status_bar = tk.Label(
+            self.root, text="Status: Probing targets every 3s | Always-on-top active",
+            bg=COLOR_HEADER, fg=COLOR_MUTED, font=("Segoe UI", 7), anchor="w", padx=10, pady=4
         )
-        self.btn_add.pack(side=tk.RIGHT, padx=2)
-        self.btn_add.bind("<Button-1>", lambda e: self.open_add_dialog())
-        self.btn_add.bind("<Enter>", lambda e: self.btn_add.config(fg=COLOR_ACCENT))
-        self.btn_add.bind("<Leave>", lambda e: self.btn_add.config(fg=COLOR_MUTED))
-
-        # Targets container
-        self.content_frame = tk.Frame(self.main_frame, bg=COLOR_BG)
-        self.content_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.render_target_list()
+
+    def toggle_frameless(self):
+        self.frameless = not self.frameless
+        self.root.overrideredirect(self.frameless)
+        if self.frameless:
+            self.btn_border.config(text="Windowed")
+            self.header.bind("<Button-1>", self.on_drag_start)
+            self.header.bind("<B1-Motion>", self.on_drag_motion)
+            self.title_lbl.bind("<Button-1>", self.on_drag_start)
+            self.title_lbl.bind("<B1-Motion>", self.on_drag_motion)
+        else:
+            self.btn_border.config(text="Frameless")
+            self.header.unbind("<Button-1>")
+            self.header.unbind("<B1-Motion>")
+            self.title_lbl.unbind("<Button-1>")
+            self.title_lbl.unbind("<B1-Motion>")
+        self.root.lift()
 
     def on_drag_start(self, event):
         self.drag_x = event.x
@@ -327,25 +326,7 @@ class DesktopOverlayApp:
         y = self.root.winfo_y() + (event.y - self.drag_y)
         self.root.geometry(f"+{x}+{y}")
 
-    def toggle_compact(self):
-        self.is_compact = not self.is_compact
-        if self.is_compact:
-            self.content_frame.pack_forget()
-            self.root.geometry(f"{self.root.winfo_width()}x32")
-            self.btn_compact.config(text="□")
-        else:
-            self.content_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-            self.update_window_height()
-            self.btn_compact.config(text="─")
-
-    def update_window_height(self):
-        if not self.is_compact:
-            targets = self.target_mgr.get_targets()
-            calculated_height = 36 + (len(targets) * 36) + 16
-            self.root.geometry(f"{self.root.winfo_width()}x{calculated_height}")
-
     def render_target_list(self):
-        # Clear existing widgets
         for widget in self.content_frame.winfo_children():
             widget.destroy()
         self.target_widgets.clear()
@@ -353,36 +334,44 @@ class DesktopOverlayApp:
         targets = self.target_mgr.get_targets()
         for t in targets:
             tid = t["id"]
-            row = tk.Frame(self.content_frame, bg=COLOR_CARD, bd=0)
-            row.pack(fill=tk.X, pady=2, ipady=4)
+            row = tk.Frame(self.content_frame, bg=COLOR_CARD, bd=1, relief="solid")
+            row.pack(fill=tk.X, pady=3, ipady=4)
 
-            # Left indicator dot
-            canvas = tk.Canvas(row, width=10, height=10, bg=COLOR_CARD, highlightthickness=0)
-            dot = canvas.create_oval(1, 1, 9, 9, fill=COLOR_MUTED, outline="")
+            # Left dot
+            canvas = tk.Canvas(row, width=12, height=12, bg=COLOR_CARD, highlightthickness=0)
+            dot = canvas.create_oval(2, 2, 10, 10, fill=COLOR_MUTED, outline="")
             canvas.pack(side=tk.LEFT, padx=(8, 8))
 
-            # Target Name
+            # Info block
+            info_frame = tk.Frame(row, bg=COLOR_CARD)
+            info_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
             name_lbl = tk.Label(
-                row, text=t["name"], bg=COLOR_CARD, fg=COLOR_TEXT,
+                info_frame, text=t["name"], bg=COLOR_CARD, fg=COLOR_TEXT,
                 font=("Segoe UI", 8, "bold"), anchor="w"
             )
-            name_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            name_lbl.pack(anchor="w")
 
-            # Right actions / metrics
-            right_box = tk.Frame(row, bg=COLOR_CARD)
-            right_box.pack(side=tk.RIGHT, padx=(4, 8))
+            detail_lbl = tk.Label(
+                info_frame, text=t["host"], bg=COLOR_CARD, fg=COLOR_MUTED,
+                font=("Segoe UI", 7), anchor="w"
+            )
+            detail_lbl.pack(anchor="w")
+
+            # Right metrics
+            right_frame = tk.Frame(row, bg=COLOR_CARD)
+            right_frame.pack(side=tk.RIGHT, padx=(4, 8))
 
             lat_lbl = tk.Label(
-                right_box, text="--ms", bg=COLOR_CARD, fg=COLOR_MUTED,
-                font=("Segoe UI", 8, "bold")
+                right_frame, text="--ms", bg=COLOR_CARD, fg=COLOR_MUTED,
+                font=("Segoe UI", 9, "bold")
             )
             lat_lbl.pack(side=tk.RIGHT)
 
-            # Delete button for custom targets
             if t.get("deletable", False):
                 del_btn = tk.Label(
-                    right_box, text="×", bg=COLOR_CARD, fg=COLOR_MUTED,
-                    font=("Segoe UI", 9), cursor="hand2"
+                    right_frame, text="✕", bg=COLOR_CARD, fg=COLOR_MUTED,
+                    font=("Segoe UI", 8), cursor="hand2"
                 )
                 del_btn.pack(side=tk.RIGHT, padx=(0, 6))
                 del_btn.bind("<Button-1>", lambda e, target_id=tid: self.delete_target(target_id))
@@ -393,58 +382,52 @@ class DesktopOverlayApp:
                 "canvas": canvas,
                 "dot": dot,
                 "lat_lbl": lat_lbl,
+                "detail_lbl": detail_lbl,
                 "row": row
             }
 
-        self.update_window_height()
-
     def delete_target(self, tid):
-        if messagebox.askyesno("NetPulse", "Remove target from overlay?"):
+        if messagebox.askyesno("NetPulse", "Remove target from monitor?"):
             self.target_mgr.delete_target(tid)
             self.render_target_list()
 
     def open_add_dialog(self):
-        # Native Toplevel popup to add a target
         dialog = tk.Toplevel(self.root)
-        dialog.title("Add Target")
+        dialog.title("Add Monitoring Target")
         dialog.attributes("-topmost", True)
         dialog.configure(bg=COLOR_BG)
-        dialog.geometry("280x230")
+        dialog.geometry("300x240+150+150")
         dialog.resizable(False, False)
 
-        tk.Label(dialog, text="Add Target to Monitor", bg=COLOR_BG, fg=COLOR_TEXT, font=("Segoe UI", 10, "bold")).pack(pady=(12, 8))
+        tk.Label(dialog, text="Add Target", bg=COLOR_BG, fg=COLOR_TEXT, font=("Segoe UI", 10, "bold")).pack(pady=(12, 6))
 
-        # Name
         tk.Label(dialog, text="Display Name:", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=16)
-        entry_name = tk.Entry(dialog, bg=COLOR_CARD, fg=COLOR_TEXT, insertbackground="white", bd=1, relief="solid")
-        entry_name.pack(fill=tk.X, padx=16, pady=(2, 8))
+        entry_name = tk.Entry(dialog, bg=COLOR_CARD, fg=COLOR_TEXT, insertbackground="white", bd=1)
+        entry_name.pack(fill=tk.X, padx=16, pady=(2, 6))
 
-        # Host / URL
-        tk.Label(dialog, text="Domain / URL / IP (e.g. 9.9.9.9):", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=16)
-        entry_host = tk.Entry(dialog, bg=COLOR_CARD, fg=COLOR_TEXT, insertbackground="white", bd=1, relief="solid")
-        entry_host.pack(fill=tk.X, padx=16, pady=(2, 8))
+        tk.Label(dialog, text="Domain / IP / URL:", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=16)
+        entry_host = tk.Entry(dialog, bg=COLOR_CARD, fg=COLOR_TEXT, insertbackground="white", bd=1)
+        entry_host.pack(fill=tk.X, padx=16, pady=(2, 6))
 
-        # Type
-        tk.Label(dialog, text="Target Type:", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=16)
+        tk.Label(dialog, text="Type:", bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=16)
         type_var = tk.StringVar(value="web")
         combo = ttk.Combobox(dialog, textvariable=type_var, values=["web", "dns_ip"], state="readonly")
-        combo.pack(fill=tk.X, padx=16, pady=(2, 14))
+        combo.pack(fill=tk.X, padx=16, pady=(2, 12))
 
         def on_save():
             name = entry_name.get().strip()
             host = entry_host.get().strip()
-            t_type = type_var.get()
             if not host:
                 messagebox.showerror("Error", "Please provide a domain or IP address.", parent=dialog)
                 return
-            self.target_mgr.add_target(name, host, target_type=t_type)
+            self.target_mgr.add_target(name, host, target_type=type_var.get())
             dialog.destroy()
             self.render_target_list()
 
         btn_box = tk.Frame(dialog, bg=COLOR_BG)
         btn_box.pack(fill=tk.X, padx=16)
-        tk.Button(btn_box, text="Cancel", bg=COLOR_CARD, fg=COLOR_TEXT, bd=0, padx=10, pady=4, command=dialog.destroy).pack(side=tk.LEFT)
-        tk.Button(btn_box, text="Add", bg=COLOR_ACCENT, fg="white", bd=0, padx=16, pady=4, command=on_save).pack(side=tk.RIGHT)
+        tk.Button(btn_box, text="Cancel", bg=COLOR_CARD, fg=COLOR_TEXT, bd=0, padx=10, command=dialog.destroy).pack(side=tk.LEFT)
+        tk.Button(btn_box, text="Save & Monitor", bg=COLOR_ACCENT, fg="white", bd=0, padx=12, command=on_save).pack(side=tk.RIGHT)
 
     def background_poll_loop(self):
         while self.running:
@@ -453,11 +436,9 @@ class DesktopOverlayApp:
             for t in targets:
                 if not self.running:
                     break
-                res = probe_target(t)
-                results[t["id"]] = res
+                results[t["id"]] = probe_target(t)
 
             if self.running:
-                # Update UI safely on the main Tkinter thread
                 self.root.after(0, lambda r=results: self.update_probe_ui(r))
 
             time.sleep(3.0)
@@ -492,8 +473,8 @@ class DesktopOverlayApp:
 
             widgets["canvas"].itemconfig(widgets["dot"], fill=color)
             widgets["lat_lbl"].config(text=text, fg=color)
+            widgets["detail_lbl"].config(text=res.get("detail", ""))
 
-        # Update Master Pulse
         if has_error:
             self.pulse_canvas.itemconfig(self.pulse_circle, fill=COLOR_RED)
         elif has_slow:
@@ -501,15 +482,22 @@ class DesktopOverlayApp:
         else:
             self.pulse_canvas.itemconfig(self.pulse_circle, fill=COLOR_GREEN)
 
-    def close_app(self):
-        self.running = False
-        self.root.destroy()
-
 
 def main():
-    root = tk.Tk()
-    app = DesktopOverlayApp(root)
-    root.mainloop()
+    log("Starting NetPulse Desktop Overlay main()")
+    try:
+        root = tk.Tk()
+        app = DesktopOverlayApp(root)
+        root.mainloop()
+        log("NetPulse closed normally")
+    except Exception as e:
+        err = traceback.format_exc()
+        log(f"CRASH: {err}")
+        try:
+            with open(os.path.join(APP_DIR, "overlay_crash.log"), "w", encoding="utf-8") as f:
+                f.write(err)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()
